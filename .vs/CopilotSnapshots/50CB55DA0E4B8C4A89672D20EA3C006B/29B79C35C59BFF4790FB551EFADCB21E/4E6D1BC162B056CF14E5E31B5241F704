@@ -1,0 +1,1396 @@
+﻿// File: lib/screens/home_screen.dart
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:playstations/services/emulator_helper.dart';
+import 'package:window_manager/window_manager.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:audioplayers_platform_interface/audioplayers_platform_interface.dart' show DeviceFileSource;
+import '../models.dart';
+import '../services/emulator_manager.dart';
+import 'emulator_screen.dart';
+import '../services/input_service.dart';
+import '../ui/ps5_theme.dart';
+import '../services/settings_service.dart';
+import 'settings_panel.dart';
+import '../services/audio_service.dart';
+import '../services/profile_service.dart';
+import '../models/emulator_extensions.dart';
+import 'emuchull_login.dart';
+import 'dart:io';
+import 'profile_home.dart';
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen>
+    with WindowListener, TickerProviderStateMixin {
+  final EmulatorManager manager = EmulatorManager();
+  // Lista global cargada desde storage
+  final List<EmulatorData> _allEmulators = [];
+  // Lista mostrada en pantalla (filtrada por perfil si aplica)
+  final List<EmulatorData> emulators = [];
+  // Índices especiales para navegación con mando/teclado
+  static const int _avatarIndex = -100;
+  static const int _logoutIndex = -101;
+  static const int _settingsIndex = -102;
+  int _selectedIndex = _avatarIndex; // Comenzar en el avatar
+  final FocusNode _focusNode = FocusNode();
+  static const int _columns = 4;
+
+  bool _windowHasFocus = true;
+  bool _inputSuspended = false;
+
+  // NEW: flag para indicar que el panel de settings está abierto
+  bool _settingsPanelOpen = false;
+
+  // Audio: música de fondo
+  final AudioPlayer _bgMusic = AudioPlayer();
+
+  final SettingsService _settings = SettingsService.instance;
+  late VoidCallback _settingsListener;
+
+  // NEW: focus para el botón de ajustes en la esquina superior
+  int _focusedTopButton = -1; // -1 = none, 0 = settings
+
+  // ADD BUTTON MENU state + controller para animaciones
+  bool _addMenuOpen = false;
+  late final AnimationController _addBtnController;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusNode.requestFocus();
+    });
+
+    windowManager.addListener(this);
+
+    // Bind Home input handlers
+    _bindInputCallbacks();
+
+    // Preload y reproducir música de fondo (loop)
+    _preloadSounds();
+    _settings.load().then((_) {
+      _applyVolumesFromSettings();
+      _prepareBgSource();
+      _playBackgroundMusic();
+    });
+
+    // Escuchar cambios de settings
+    _settingsListener = () {
+      _applyVolumesFromSettings();
+    };
+    _settings.masterVolume.addListener(_settingsListener);
+    _settings.musicVolume.addListener(_settingsListener);
+    _settings.sfxVolume.addListener(_settingsListener);
+    // listen bg music changes
+    _settings.bgMusicEnabled.addListener(_onBgMusicChanged);
+    _settings.audio.bgMusicPath.addListener(_onBgMusicChanged);
+  }
+
+  @override
+  void dispose() {
+    _settings.masterVolume.removeListener(_settingsListener);
+    _settings.musicVolume.removeListener(_settingsListener);
+    _settings.sfxVolume.removeListener(_settingsListener);
+    _settings.bgMusicEnabled.removeListener(_onBgMusicChanged);
+    _settings.audio.bgMusicPath.removeListener(_onBgMusicChanged);
+    _unbind_input_and_listeners();
+    windowManager.removeListener(this);
+    _focusNode.dispose();
+
+    // Audio cleanup
+    _bgMusic.dispose();
+
+    _addBtnController.dispose();
+
+    super.dispose();
+  }
+
+  Future<void> _unbind_input_and_listeners() async {
+    _unbindInputCallbacks();
+    // don't call InputService.dispose here because we may need it later
+  }
+
+  // --------------------
+  // Audio helpers
+  // --------------------
+  Future<void> _preloadSounds() async {
+    try {
+      await _prepareBgSource();
+      await _bgMusic.setReleaseMode(ReleaseMode.loop);
+    } catch (e) {
+      debugPrint('preload home bg music error: $e');
+    }
+
+    // Aseguramos que AudioService esté listo (SFX)
+    await AudioService.instance.init();
+  }
+
+  void _applyVolumesFromSettings() {
+    final master = _settings.masterVolume.value;
+    final music = _settings.musicVolume.value;
+    // bg music volumen (local)
+    try {
+      _bgMusic.setVolume((master * music).clamp(0.0, 1.0));
+    } catch (e) {
+      debugPrint('bg volume apply error: $e');
+    }
+
+    // SFX via AudioService
+    AudioService.instance.applyVolumesFromSettings();
+  }
+
+  void _playNav() => AudioService.instance.playNav();
+  void _playAction() => AudioService.instance.playAction();
+
+  Future<void> _playBackgroundMusic() async {
+    try {
+      await _prepareBgSource();
+      await _bgMusic.seek(Duration.zero);
+      await _bgMusic.setVolume(
+          (_settings.masterVolume.value * _settings.musicVolume.value)
+              .clamp(0.0, 1.0));
+      if (_settings.bgMusicEnabled.value) {
+        await _bgMusic.resume();
+      } else {
+        await _bgMusic.stop();
+      }
+    } catch (e) {
+      debugPrint('bg music play error: $e');
+      try {
+        await _prepareBgSource();
+        if (_settings.bgMusicEnabled.value) {
+          await _bgMusic.play(AssetSource('sounds/bg_menu.mp3'),
+              volume: (_settings.masterVolume.value * _settings.musicVolume.value)
+                  .clamp(0.0, 1.0));
+          await _bgMusic.setReleaseMode(ReleaseMode.loop);
+        }
+      } catch (e2) {
+        debugPrint('bg music fallback play error: $e2');
+      }
+    }
+  }
+
+  Future<void> _stopBackgroundMusic() async {
+    try {
+      await _bgMusic.stop();
+    } catch (e) {
+      debugPrint('stop bg music error: $e');
+    }
+  }
+
+  // WindowListener
+  @override
+  void onWindowFocus() {
+    if (!_isCurrentRoute()) return;
+    _windowHasFocus = true;
+    // Si el panel de settings está abierto, no forzamos lógica distinta:
+    if (!_settingsPanelOpen) _resumeInput();
+  }
+
+  @override
+  void onWindowBlur() {
+    if (!_isCurrentRoute()) return;
+    _windowHasFocus = false;
+    // NEW: si el panel está abierto, NO suspendemos el input (así el panel sigue recibiendo eventos)
+    if (_settingsPanelOpen) return;
+    _suspendInput();
+  }
+
+  @override
+  void onWindowMinimize() {
+    if (!_isCurrentRoute()) return;
+    _windowHasFocus = false;
+    if (_settingsPanelOpen) return;
+    _suspendInput();
+  }
+
+  @override
+  void onWindowRestore() {
+    if (!_isCurrentRoute()) return;
+    _windowHasFocus = true;
+    if (!_settingsPanelOpen) _resumeInput();
+  }
+
+  Future<void> _load() async {
+    final loaded = await manager.loadEmulators();
+    // Mantener la lista global y luego aplicar filtro por perfil (si existe)
+    _allEmulators
+      ..clear()
+      ..addAll(loaded);
+
+    final current = ProfileService.instance.currentProfile;
+    final List<EmulatorData> toShow;
+    if (current != null) {
+      final ids = current.emulatorIds.toSet();
+      toShow = loaded.where((e) => ids.contains(e.id)).toList();
+    } else {
+      toShow = loaded;
+    }
+
+    setState(() {
+      emulators
+        ..clear()
+        ..addAll(toShow);
+      if (emulators.isNotEmpty && _selectedIndex == -1) {
+        _selectedIndex = 0;
+      }
+    });
+  }
+
+  Future<void> _save() async => manager.saveEmulators(_allEmulators);
+
+  Future<void> _addEmulator() async {
+    final emulator = await manager.pickEmulatorAndGames();
+    if (emulator == null) return;
+
+    // Añadir al almacenamiento global
+    _allEmulators.add(emulator);
+    await manager.saveEmulators(_allEmulators);
+
+    // Si hay un perfil activo, asociar el emulador al perfil
+    final current = ProfileService.instance.currentProfile;
+    if (current != null) {
+      if (!current.emulatorIds.contains(emulator.id)) {
+        current.emulatorIds.add(emulator.id);
+        // persistir cambios en perfiles
+        final profiles = await ProfileService.instance.loadProfiles();
+        final idx = profiles.indexWhere((p) => p.id == current.id);
+        if (idx >= 0) {
+          profiles[idx] = current;
+        } else {
+          profiles.add(current);
+        }
+        await ProfileService.instance.saveProfiles(profiles);
+        ProfileService.instance.setCurrentProfile(current);
+      }
+    }
+
+    // Recargar la vista para aplicar filtro por perfil si corresponde
+    await _load();
+  }
+
+  Future<void> _removeEmulator(int index) async {
+    if (index < 0 || index >= emulators.length) return;
+
+    final emu = emulators[index];
+    final current = ProfileService.instance.currentProfile;
+
+    if (current != null) {
+      // Si hay perfil activo, solo quitar la referencia en el perfil
+      current.emulatorIds.removeWhere((id) => id == emu.id);
+      final profiles = await ProfileService.instance.loadProfiles();
+      final idx = profiles.indexWhere((p) => p.id == current.id);
+      if (idx >= 0) profiles[idx] = current;
+      await ProfileService.instance.saveProfiles(profiles);
+      ProfileService.instance.setCurrentProfile(current);
+      // recargar vista filtrada
+      await _load();
+      return;
+    }
+
+    // Si no hay perfil, eliminamos el emulador globalmente
+    final globalIdx = _allEmulators.indexWhere((e) => e.id == emu.id);
+    if (globalIdx >= 0) _allEmulators.removeAt(globalIdx);
+    // actualizar vista y persistir
+    await manager.saveEmulators(_allEmulators);
+    await _load();
+  }
+
+  void _openEmulator(int index) {
+    if (index < 0 || index >= emulators.length) return;
+
+    _stopBackgroundMusic();
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => EmulatorScreen(
+          emulator: emulators[index],
+          onChanged: () async {
+            await _save();
+            setState(() {});
+          },
+        ),
+      ),
+    ).then((_) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _playBackgroundMusic();
+        if (_isCurrentRoute()) {
+          _requestFocus();
+          _bindInputCallbacks();
+          if (!_inputSuspended && !_windowHasFocus) {
+            _windowHasFocus = true;
+          }
+          _resumeInput();
+        }
+      });
+    });
+  }
+
+  Future<void> _openSettingsPanelWithController() async {
+    final controller = SettingsPanelController();
+
+    final input = InputService.instance;
+
+    // Listener que forwarded al controller; ahora forwardeamos también
+    // onShare (X) -> controller.onReset y onSettings (Y/triangle) -> controller.onApply
+    final settingsListener = InputListener(
+      onLeft: () => controller.onLeft?.call(),
+      onRight: () => controller.onRight?.call(),
+      onUp: () => controller.onUp?.call(),
+      onDown: () => controller.onDown?.call(),
+      onActivate: () => controller.onActivate?.call(),
+      onBack: () => controller.onBack?.call(),
+      onToggleFullscreen: () {}, // swallow while settings open
+      onSelect: () {}, // swallow (leave unused)
+      onShare: () => controller.onReset?.call(), // X -> restablecer borrador
+      onSettings: () =>
+          controller.onApply?.call(), // Y (triangle) -> aplicar (guardar)
+    );
+
+    // Push listener and keep remover to pop it later
+    final removeListener = input.pushListener(settingsListener);
+
+    // Disable keyboard focus in Home so RawKeyboardListener no procese teclas duplicadas
+    _focusNode.unfocus();
+
+    // Stop background music while panel open
+    await _stopBackgroundMusic();
+
+    _settingsPanelOpen = true;
+
+    try {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => SettingsPanel(controller: controller, asRoute: true),
+          fullscreenDialog: true,
+        ),
+      );
+    } finally {
+      // Remove the temporary listener so previous listeners / globals take effect again
+      try {
+        removeListener();
+      } catch (_) {}
+
+      _settingsPanelOpen = false;
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focusNode.requestFocus();
+      });
+
+      try {
+        await InputService.instance.resume();
+      } catch (e) {
+        debugPrint('Error resuming InputService after settings: $e');
+      }
+
+      _bindInputCallbacks();
+      _playBackgroundMusic();
+    }
+  }
+
+  // --------------------------
+  // Input callbacks (home)
+  // --------------------------
+  void _bindInputCallbacks() {
+    final input = InputService.instance;
+    input.onLeft = () {
+      if (_selectedIndex == _avatarIndex) {
+        setState(() => _selectedIndex = _logoutIndex);
+        return;
+      }
+      if (_selectedIndex == _logoutIndex) {
+        setState(() => _selectedIndex = _settingsIndex);
+        return;
+      }
+      if (_selectedIndex == _settingsIndex) {
+        setState(() => _selectedIndex = _avatarIndex);
+        return;
+      }
+      _moveLeft(fromController: true);
+    };
+    input.onRight = () {
+      if (_selectedIndex == _avatarIndex) {
+        setState(() => _selectedIndex = _settingsIndex);
+        return;
+      }
+      if (_selectedIndex == _settingsIndex) {
+        setState(() => _selectedIndex = _logoutIndex);
+        return;
+      }
+      if (_selectedIndex == _logoutIndex) {
+        setState(() => _selectedIndex = _avatarIndex);
+        return;
+      }
+      _moveRight(fromController: true);
+    };
+    input.onUp = () {
+      // Si estamos en la primera fila, mover a avatar
+      if (_selectedIndex >= 0 && _selectedIndex < _columns) {
+        setState(() => _selectedIndex = _avatarIndex);
+        return;
+      }
+      _moveUp(fromController: true);
+    };
+    input.onDown = () {
+      // Si estamos en avatar, logout o settings, ir al primer emulador
+      if (_selectedIndex == _avatarIndex || _selectedIndex == _logoutIndex || _selectedIndex == _settingsIndex) {
+        setState(() => _selectedIndex = emulators.isNotEmpty ? 0 : -2);
+        return;
+      }
+      _moveDown(fromController: true);
+    };
+    input.onActivate = () {
+      if (_selectedIndex == _avatarIndex) {
+        final current = ProfileService.instance.currentProfile;
+        if (current != null) {
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => ProfileHomeScreen(profile: current),
+            ),
+          );
+        }
+        return;
+      }
+      if (_selectedIndex == _logoutIndex) {
+        ProfileService.instance.clearCurrentProfile();
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const EmuChullLoginScreen()),
+        );
+        return;
+      }
+      if (_selectedIndex == _settingsIndex) {
+        _openSettingsPanelWithController();
+        return;
+      }
+      _onActivate();
+    };
+    input.onBack = () {
+      debugPrint("Botón 'Atrás' en HomeScreen");
+      _playAction();
+    };
+    input.onToggleFullscreen = _toggleFullScreen;
+
+    // NUEVOS: abrir panel con Select o Share (legacy)
+    input.onSelect = () {
+      _playAction();
+      _openSettingsPanelWithController();
+    };
+    input.onShare = () {
+      _playAction();
+      _openSettingsPanelWithController();
+    };
+  }
+
+  void _unbindInputCallbacks() {
+    final input = InputService.instance;
+    input.onLeft = null;
+    input.onRight = null;
+    input.onUp = null;
+    input.onDown = null;
+    input.onActivate = null;
+    input.onBack = null;
+    input.onToggleFullscreen = null;
+    input.onSelect = null;
+    input.onShare = null;
+  }
+
+  Future<void> _suspendInput() async {
+    if (_inputSuspended) return;
+    try {
+      _unbindInputCallbacks();
+      await InputService.instance.suspend();
+    } catch (_) {}
+    _inputSuspended = true;
+  }
+
+  Future<void> _resumeInput() async {
+    if (!_inputSuspended) return;
+    try {
+      await InputService.instance.resume();
+      _bindInputCallbacks();
+    } catch (_) {
+      _bindInputCallbacks();
+    }
+    _inputSuspended = false;
+  }
+
+  bool _isCurrentRoute() {
+    try {
+      if (!mounted) return false;
+      final route = ModalRoute.of(context);
+      return route?.isCurrent ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ------------------------
+  // Navigation helpers (ahora aceptan fromController)
+  // ------------------------
+  void _moveLeft({bool fromController = false}) {
+    if (!_windowHasFocus) return;
+    if (emulators.isEmpty) return;
+    if (_selectedIndex == _avatarIndex) {
+      setState(() => _selectedIndex = _logoutIndex);
+      _requestFocus();
+      return;
+    }
+    if (_selectedIndex == _logoutIndex) {
+      setState(() => _selectedIndex = _avatarIndex);
+      _requestFocus();
+      return;
+    }
+
+    if (fromController && _selectedIndex == -2) {
+      setState(() => _selectedIndex = 0);
+      _requestFocus();
+      return;
+    }
+
+    setState(() {
+      if (_selectedIndex <= 0) {
+        _selectedIndex = emulators.length - 1;
+      } else {
+        _selectedIndex--;
+      }
+    });
+    _requestFocus();
+  }
+
+  void _moveRight({bool fromController = false}) {
+    if (!_windowHasFocus) return;
+    if (emulators.isEmpty) return;
+    if (_selectedIndex == _avatarIndex) {
+      setState(() => _selectedIndex = _logoutIndex);
+      _requestFocus();
+      return;
+    }
+    if (_selectedIndex == _logoutIndex) {
+      setState(() => _selectedIndex = _avatarIndex);
+      _requestFocus();
+      return;
+    }
+
+    if (fromController && _selectedIndex == -2) {
+      setState(() => _selectedIndex = 0);
+      _requestFocus();
+      return;
+    }
+
+    setState(() {
+      _selectedIndex = (_selectedIndex + 1) % emulators.length;
+    });
+    _requestFocus();
+  }
+
+  void _moveDown({bool fromController = false}) {
+    if (!_windowHasFocus) return;
+    if (emulators.isEmpty) return;
+
+    if (fromController && _selectedIndex == -2) {
+      setState(() => _selectedIndex = 0);
+      _requestFocus();
+      return;
+    }
+
+    if (_selectedIndex == -2) {
+      setState(() => _selectedIndex = 0);
+      _requestFocus();
+      return;
+    }
+
+    setState(
+        () => _selectedIndex = (_selectedIndex + _columns) % emulators.length);
+    _requestFocus();
+  }
+
+  void _moveUp({bool fromController = false}) {
+    if (!_windowHasFocus) return;
+    if (emulators.isEmpty) return;
+
+    if (!fromController && _selectedIndex < _columns) {
+      setState(() => _selectedIndex = -2);
+      _requestFocus();
+      return;
+    }
+
+    if (fromController && _selectedIndex < _columns) {
+      final posInCol = _selectedIndex % _columns;
+      final lastRowStart =
+          ((emulators.length - 1) / _columns).floor() * _columns;
+      final target = (lastRowStart + posInCol).clamp(0, emulators.length - 1);
+      setState(() => _selectedIndex = target);
+      _requestFocus();
+      return;
+    }
+
+    final posInCol = _selectedIndex % _columns;
+    final rows = (emulators.length / _columns).ceil();
+    final currRow = (_selectedIndex / _columns).floor();
+    int targetRow = currRow - 1;
+    if (targetRow < 0) targetRow = rows - 1;
+    int target = targetRow * _columns + posInCol;
+    if (target >= emulators.length) target = emulators.length - 1;
+    setState(() => _selectedIndex = target);
+    _requestFocus();
+  }
+
+  void _onActivate() {
+    if (!_windowHasFocus) return;
+    if (_selectedIndex == -2) {
+      // show dialog instead of directly calling pick
+      _showAddEmulatorDialog();
+      return;
+    } else if (emulators.isNotEmpty) {
+      _openEmulator(_selectedIndex);
+    }
+  }
+
+  void _requestFocus() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusNode.requestFocus();
+    });
+  }
+
+  void _onRawKey(RawKeyEvent event) {
+    if (!_windowHasFocus) return;
+    final typeName = event.runtimeType.toString().toLowerCase();
+    final isDown =
+        typeName.contains('keydown') || typeName.contains('rawkeydown');
+    if (!isDown) return;
+
+    final key = event.logicalKey;
+    // If top button focused, handle keys for it
+    if (_focusedTopButton != -1) {
+      if (key == LogicalKeyboardKey.arrowDown) {
+        _playNav();
+        // move back to grid
+        setState(() {
+          _selectedIndex = emulators.isNotEmpty ? 0 : -2;
+          _focusedTopButton = -1;
+        });
+        _requestFocus();
+        return;
+      } else if (key == LogicalKeyboardKey.enter ||
+          key == LogicalKeyboardKey.numpadEnter) {
+        _playAction();
+        _openSettingsPanelWithController();
+        return;
+      } else if (key == LogicalKeyboardKey.escape ||
+          key == LogicalKeyboardKey.goBack) {
+        _playAction();
+        setState(() => _focusedTopButton = -1);
+        _requestFocus();
+        return;
+      } else if (key == LogicalKeyboardKey.arrowLeft ||
+          key == LogicalKeyboardKey.arrowRight) {
+        // nothing to do (only one top button)
+        _playNav();
+        return;
+      }
+    }
+
+    if (key == LogicalKeyboardKey.arrowRight) {
+      _playNav();
+      _moveRight(fromController: false);
+    } else if (key == LogicalKeyboardKey.arrowLeft) {
+      _playNav();
+      _moveLeft(fromController: false);
+    } else if (key == LogicalKeyboardKey.arrowDown) {
+      _playNav();
+      _moveDown(fromController: false);
+    } else if (key == LogicalKeyboardKey.arrowUp) {
+      _playNav();
+      // if in top row, move focus to settings button
+      if (_isInTopRowHome()) {
+        setState(() => _focusedTopButton = 0);
+        return;
+      }
+      _moveUp(fromController: false);
+    } else if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      _playAction();
+      _onActivate();
+    } else if (key == LogicalKeyboardKey.f11) {
+      _toggleFullScreen();
+    } else if (key == LogicalKeyboardKey.keyA) {
+      // quick keyboard shortcut 'A' para abrir el menú de agregar
+      _toggleAddMenu();
+    }
+  }
+
+  Future<void> _toggleFullScreen() async {
+    try {
+      final isFull = await windowManager.isFullScreen();
+      await windowManager.setFullScreen(!isFull);
+    } catch (e) {
+      debugPrint('Toggle fullscreen error: $e');
+    }
+  }
+
+  bool _isInTopRowHome() {
+    if (emulators.isEmpty) return true; // if no emus, consider top row
+    if (_selectedIndex == -2) return true; // add button is top area
+    return _selectedIndex >= 0 && _selectedIndex < _columns;
+  }
+
+  // --------------------
+  // Nuevo: diálogo para elegir tipo de agregado (emulador normal o tarjeta PC)
+  // --------------------
+  Future<void> _showAddEmulatorDialog() async {
+    final choice = await showDialog<String?>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('Agregar'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, 'normal'),
+            child: const Text('Agregar emulador (EXE)'),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, 'pc'),
+            child: const Text('Crear tarjeta PC (añadir .exe manualmente)'),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, null),
+            child: const Text('Cancelar'),
+          ),
+        ],
+      ),
+    );
+
+    if (choice == 'normal') {
+      await _addEmulator();
+    } else if (choice == 'pc') {
+      await _createPcCardFlow();
+    }
+  }
+
+  Future<void> _createPcCardFlow() async {
+    final controller = TextEditingController(text: 'PC');
+    final name = await showDialog<String?>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Nombre de la tarjeta PC'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(labelText: 'Nombre'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, null),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Crear'),
+          ),
+        ],
+      ),
+    );
+
+    if (name == null || name.isEmpty) return;
+
+    final newCard = manager.createPcCard(displayName: name);
+    setState(() {
+      emulators.add(newCard);
+      _selectedIndex = emulators.length - 1;
+    });
+    await _save();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Tarjeta PC "$name" creada')),
+    );
+  }
+
+  // Toggle menú animado
+  void _toggleAddMenu() {
+    setState(() {
+      _addMenuOpen = !_addMenuOpen;
+      if (_addMenuOpen) {
+        _addBtnController.forward();
+      } else {
+        _addBtnController.reverse();
+      }
+    });
+    _playNav();
+  }
+
+  // ------------------------
+  // UI
+  // ------------------------
+  @override
+  Widget build(BuildContext context) {
+    final theme = PS5Theme.instance;
+    final current = ProfileService.instance.currentProfile;
+    return Scaffold(
+      backgroundColor: theme.bg,
+      body: RawKeyboardListener(
+        focusNode: _focusNode,
+        onKey: _onRawKey,
+        child: Stack(
+          children: [
+            // Fondo: imagen + overlay oscuro para contraste
+            Container(
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    Color(0xFF0B0B0B),
+                    Color(0xFF111111),
+                  ],
+                ),
+                image: const DecorationImage(
+                  image: AssetImage("assets/images/principal.jpg"),
+                  fit: BoxFit.cover,
+                  opacity: 0.12,
+                ),
+              ),
+            ),
+
+            // Contenido principal con SafeArea
+            SafeArea(
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 18.0, vertical: 12),
+                child: Column(
+                  children: [
+                    const SizedBox(height: 6),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        // Avatar y logout navegables
+                        if (current != null)
+                          Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              GestureDetector(
+                                onTap: () {
+                                  Navigator.of(context).push(
+                                    MaterialPageRoute(
+                                      builder: (_) => ProfileHomeScreen(profile: current),
+                                    ),
+                                  );
+                                },
+                                child: Container(
+                                  decoration: _selectedIndex == _avatarIndex
+                                      ? BoxDecoration(
+                                          border: Border.all(color: theme.accent, width: 2.0),
+                                          shape: BoxShape.circle,
+                                        )
+                                      : null,
+                                  child: CircleAvatar(
+                                    radius: 34,
+                                    backgroundColor: Colors.white12,
+                                    backgroundImage: current.avatarPath != null
+                                        ? FileImage(File(current.avatarPath!))
+                                        : null,
+                                    child: current.avatarPath == null
+                                        ? Text(
+                                            current.name.isNotEmpty
+                                                ? current.name[0].toUpperCase()
+                                                : '?',
+                                            style: const TextStyle(
+                                                color: Colors.white, fontSize: 18),
+                                          )
+                                        : null,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(current.name,
+                                  style: const TextStyle(
+                                      color: Colors.white, fontSize: 14)),
+                              GestureDetector(
+                                onTap: () {
+                                  ProfileService.instance.clearCurrentProfile();
+                                  Navigator.of(context).pushReplacement(
+                                    MaterialPageRoute(
+                                        builder: (_) => const EmuChullLoginScreen()),
+                                  );
+                                },
+                                child: Container(
+                                  decoration: _selectedIndex == _logoutIndex
+                                      ? BoxDecoration(
+                                          border: Border.all(color: theme.accent, width: 2.0),
+                                          borderRadius: BorderRadius.circular(6.0),
+                                        )
+                                      : null,
+                                  child: IconButton(
+                                    icon: const Icon(Icons.exit_to_app, color: Colors.white),
+                                    onPressed: () {
+                                      ProfileService.instance.clearCurrentProfile();
+                                      Navigator.of(context).pushReplacement(
+                                        MaterialPageRoute(
+                                            builder: (_) => const EmuChullLoginScreen()),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        // Mascota (opcional - asset sugerida)
+                        SizedBox(
+                          width: 120,
+                          height: 120,
+                          child: Image.asset(
+                            'assets/images/mascot.png',
+                            fit: BoxFit.contain,
+                            errorBuilder: (ctx, err, st) => const SizedBox(),
+                          ),
+                        ),
+
+                        const SizedBox(width: 12),
+
+                        // Título y subtítulo centrados verticalmente
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              // Gran título tipo cartel (puedes ajustar size)
+                              Text(
+                                'EMUCHULL',
+                                style: TextStyle(
+                                  fontSize: 56,
+                                  fontWeight: FontWeight.w900,
+                                  color: Colors.white,
+                                  letterSpacing: 1.6,
+                                  shadows: [
+                                    Shadow(
+                                      color: theme.accent.withOpacity(0.16),
+                                      offset: const Offset(0, 6),
+                                      blurRadius: 18,
+                                    ),
+                                    const Shadow(
+                                      color: Colors.black54,
+                                      offset: Offset(2, 2),
+                                      blurRadius: 6,
+                                    )
+                                  ],
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+
+                              const SizedBox(height: 6),
+
+                              Row(
+                                children: [
+                                  // Subtítulo
+                                  const Text(
+                                    'emulador universal',
+                                    style: TextStyle(
+                                      fontSize: 18,
+                                      fontStyle: FontStyle.italic,
+                                      color: Colors.white70,
+                                    ),
+                                  ),
+
+                                  const SizedBox(width: 12),
+
+                                  // Mando (opcional asset) pequeño
+                                  SizedBox(
+                                    width: 64,
+                                    height: 40,
+                                    child: Image.asset(
+                                      'assets/images/controller.png',
+                                      fit: BoxFit.contain,
+                                      errorBuilder: (ctx, err, st) =>
+                                          const SizedBox(),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 18),
+
+                    // Grid / body
+                    Expanded(
+                      child: emulators.isEmpty
+                          ? Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.storage,
+                                      size: 56, color: Colors.white38),
+                                  const SizedBox(height: 12),
+                                  const Text(
+                                    "No hay emuladores agregados",
+                                    style: TextStyle(
+                                        fontSize: 18,
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : GridView.builder(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 6),
+                              gridDelegate:
+                                  const SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount: _columns,
+                                crossAxisSpacing: 20,
+                                mainAxisSpacing: 20,
+                                childAspectRatio: 0.8,
+                              ),
+                              itemCount: emulators.length,
+                              itemBuilder: (context, index) {
+                                final emu = emulators[index];
+                                final isSelected = index == _selectedIndex &&
+                                    _focusedTopButton == -1;
+                                return PS5EmulatorCard(
+                                  title: emu.name,
+                                  iconAsset:
+                                      EmulatorHelper.getEmulatorIcon(emu.name),
+                                  isSelected: isSelected,
+                                  onTap: () {
+                                    _playAction();
+                                    setState(() => _selectedIndex = index);
+                                    _openEmulator(index);
+                                  },
+                                  onDelete: () {
+                                    _playAction();
+                                    _removeEmulator(index);
+                                  },
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            // Botón de ajustes (arriba-derecha)
+            Positioned(
+              top: 12,
+              right: 12,
+              child: Container(
+                decoration: _focusedTopButton == 0
+                    ? BoxDecoration(
+                        border: Border.all(color: theme.accent, width: 2.0),
+                        borderRadius: BorderRadius.circular(6.0),
+                      )
+                    : null,
+                child: IconButton(
+                  iconSize: 28,
+                  tooltip: 'Ajustes',
+                  icon: Icon(
+                    Icons.settings,
+                    color:
+                        _focusedTopButton == 0 ? theme.accent : Colors.white70,
+                  ),
+                  onPressed: () async {
+                    _playAction();
+                    await _openSettingsPanelWithController();
+                    // ensure volumes saved and applied after closing
+                    await _settings.save();
+                    _applyVolumesFromSettings();
+                  },
+                ),
+              ),
+            ),
+
+            // ---------------------------
+            // Floating Add Menu (bottom-right)
+            // ---------------------------
+            _buildFloatingAddMenu(theme),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Construye el menú flotante con animaciones y mini-actions
+  Widget _buildFloatingAddMenu(PS5Theme theme) {
+    final double mainSize = 76;
+    final double miniSize = 52;
+    final double padding = 18;
+
+    // Aquí ampliamos el área interactiva para cubrir las mini-acciones y sus etiquetas.
+    final double areaWidth = 260; // suficiente para la etiqueta + botón
+    final double areaHeight = mainSize + miniSize * 2 + 72;
+
+    return Positioned(
+      right: padding,
+      bottom: padding,
+      child: SafeArea(
+        child: SizedBox(
+          width: areaWidth,
+          height: areaHeight,
+          child: Stack(
+            clipBehavior: Clip.none,
+            alignment: Alignment.bottomRight,
+            children: [
+              // Glow radial detrás (se extiende fuera del box gracias a Clip.none)
+              Positioned(
+                right: -(mainSize * 0.3),
+                bottom: -(mainSize * 0.3),
+                child: AnimatedOpacity(
+                  duration: const Duration(milliseconds: 260),
+                  opacity: _addMenuOpen ? 0.95 : 0.0,
+                  child: Container(
+                    width: mainSize * 2.2,
+                    height: mainSize * 2.2,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: RadialGradient(
+                        colors: [
+                          theme.accent.withOpacity(0.18),
+                          Colors.transparent,
+                        ],
+                        radius: 0.6,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+
+              // Mini 1: Crear tarjeta PC (más cerca del principal)
+              Positioned(
+                right: 0,
+                bottom: mainSize + 12,
+                child: IgnorePointer(
+                  ignoring: !_addMenuOpen,
+                  child: AnimatedOpacity(
+                    duration: const Duration(milliseconds: 240),
+                    opacity: _addMenuOpen ? 1.0 : 0.0,
+                    child: AnimatedSlide(
+                      duration: const Duration(milliseconds: 240),
+                      offset:
+                          _addMenuOpen ? Offset.zero : const Offset(0.06, 0.12),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // etiqueta a la izquierda
+                          _miniActionLabel('Tarjeta PC'),
+                          const SizedBox(width: 10),
+                          // botón circular a la derecha
+                          Tooltip(
+                            message: 'Crear tarjeta PC',
+                            child: _miniCircleButton(
+                              size: miniSize,
+                              icon: Icons.computer,
+                              tooltip: 'Crear tarjeta PC',
+                              color: Colors.deepPurpleAccent,
+                              onTap: () async {
+                                _playAction();
+                                _toggleAddMenu();
+                                await _createPcCardFlow();
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+
+              // Mini 2: Agregar emulador (más arriba)
+              Positioned(
+                right: 0,
+                bottom: mainSize + miniSize + 24,
+                child: IgnorePointer(
+                  ignoring: !_addMenuOpen,
+                  child: AnimatedOpacity(
+                    duration: const Duration(milliseconds: 300),
+                    opacity: _addMenuOpen ? 1.0 : 0.0,
+                    child: AnimatedSlide(
+                      duration: const Duration(milliseconds: 300),
+                      offset:
+                          _addMenuOpen ? Offset.zero : const Offset(0.06, 0.18),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _miniActionLabel('Agregar emulador'),
+                          const SizedBox(width: 10),
+                          Tooltip(
+                            message: 'Agregar emulador (.exe)',
+                            child: _miniCircleButton(
+                              size: miniSize,
+                              icon: Icons.folder_open,
+                              tooltip: 'Agregar emulador (.exe)',
+                              color: theme.accent,
+                              onTap: () async {
+                                _playAction();
+                                _toggleAddMenu();
+                                await _addEmulator();
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+
+              // Main big button (en la parte inferior derecha del área)
+              Positioned(
+                right: 0,
+                bottom: 0,
+                child: GestureDetector(
+                  onTap: () {
+                    _toggleAddMenu();
+                  },
+                  child: ScaleTransition(
+                    scale: Tween<double>(begin: 1.0, end: 1.02).animate(
+                      CurvedAnimation(
+                          parent: _addBtnController, curve: Curves.easeOut),
+                    ),
+                    child: Container(
+                      width: mainSize,
+                      height: mainSize,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            theme.accent,
+                            theme.accent.withOpacity(0.78),
+                          ],
+                        ),
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: theme.accent.withOpacity(0.34),
+                            blurRadius: 28,
+                            spreadRadius: 2,
+                          ),
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.55),
+                            blurRadius: 8,
+                            offset: const Offset(0, 6),
+                          ),
+                        ],
+                      ),
+                      child: Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          RotationTransition(
+                            turns: Tween<double>(begin: 0, end: 0.125)
+                                .animate(_addBtnController),
+                            child: Icon(
+                              _addMenuOpen ? Icons.close_rounded : Icons.add,
+                              size: 36,
+                              color: Colors.white,
+                            ),
+                          ),
+                          Positioned(
+                            bottom: 8,
+                            child: AnimatedOpacity(
+                              duration: const Duration(milliseconds: 200),
+                              opacity: _addMenuOpen ? 0.0 : 1.0,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withOpacity(0.28),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: const Text('Agregar',
+                                    style: TextStyle(
+                                        color: Colors.white70, fontSize: 12)),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _miniCircleButton({
+    required double size,
+    required IconData icon,
+    required String tooltip,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    final theme = PS5Theme.instance;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onTap,
+        // Forzamos ripples en blanco (estilo EmuChull)
+        splashColor: theme.accent.withOpacity(0.14),
+        highlightColor: theme.accent.withOpacity(0.06),
+        child: Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [color.withOpacity(0.95), color.withOpacity(0.78)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                  color: color.withOpacity(0.28),
+                  blurRadius: 18,
+                  spreadRadius: 1),
+              BoxShadow(
+                  color: Colors.black.withOpacity(0.45),
+                  blurRadius: 6,
+                  offset: const Offset(0, 4)),
+            ],
+          ),
+          child: Icon(icon, color: Colors.white, size: 22),
+        ),
+      ),
+    );
+  }
+
+  Widget _miniActionLabel(String text) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 180),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white10,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white10),
+        boxShadow: [
+          BoxShadow(
+              color: Colors.black.withOpacity(0.32),
+              blurRadius: 4,
+              offset: const Offset(0, 2))
+        ],
+      ),
+      child: Text(text,
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis),
+    );
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "dgSpecHash": "LoVETswU4VU=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\DavidSax\\Desktop\\EmuChull\\tools\\controller-light\\SetControllerLight.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\DavidSax\\.nuget\\packages\\hidsharp\\2.6.2\\hidsharp.2.6.2.nupkg.sha512",
+    "C:\\Users\\DavidSax\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.20\\microsoft.netcore.app.ref.8.0.20.nupkg.sha512",
+    "C:\\Users\\DavidSax\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.20\\microsoft.windowsdesktop.app.ref.8.0.20.nupkg.sha512",
+    "C:\\Users\\DavidSax\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.20\\microsoft.aspnetcore.app.ref.8.0.20.nupkg.sha512",
+    "C:\\Users\\DavidSax\\.nuget\\packages\\microsoft.netcore.app.host.win-x64\\8.0.20\\microsoft.netcore.app.host.win-x64.8.0.20.nupkg.sha512"
+  ],
+  "logs": [
+    {
+      "code": "NU1603",
+      "level": "Warning",
+      "message": "SetControllerLight depende de HidSharp (>= 2.2.0), pero no se encontró HidSharp 2.2.0. HidSharp 2.6.2 se resolvió en su lugar.",
+      "projectPath": "C:\\Users\\DavidSax\\Desktop\\EmuChull\\tools\\controller-light\\SetControllerLight.csproj",
+      "warningLevel": 1,
+      "filePath": "C:\\Users\\DavidSax\\Desktop\\EmuChull\\tools\\controller-light\\SetControllerLight.csproj",
+      "libraryId": "HidSharp",
+      "targetGraphs": [
+        "net8.0"
+      ]
+    }
+  ]
+}

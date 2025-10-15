@@ -1,0 +1,17 @@
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\bin\Release\net7.0\SetControllerLight.exe
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\bin\Release\net7.0\SetControllerLight.deps.json
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\bin\Release\net7.0\SetControllerLight.runtimeconfig.json
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\bin\Release\net7.0\SetControllerLight.dll
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\bin\Release\net7.0\SetControllerLight.pdb
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\bin\Release\net7.0\HidSharp.dll
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\obj\Release\net7.0\SetControllerLight.csproj.AssemblyReference.cache
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\obj\Release\net7.0\SetControllerLight.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\obj\Release\net7.0\SetControllerLight.AssemblyInfoInputs.cache
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\obj\Release\net7.0\SetControllerLight.AssemblyInfo.cs
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\obj\Release\net7.0\SetControllerLight.csproj.CoreCompileInputs.cache
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\obj\Release\net7.0\SetContr.13B66F29.Up2Date
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\obj\Release\net7.0\SetControllerLight.dll
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\obj\Release\net7.0\refint\SetControllerLight.dll
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\obj\Release\net7.0\SetControllerLight.pdb
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\obj\Release\net7.0\SetControllerLight.genruntimeconfig.cache
+C:\Users\DavidSax\Desktop\EmuChull\tools\controller-light\obj\Release\net7.0\ref\SetControllerLight.dll

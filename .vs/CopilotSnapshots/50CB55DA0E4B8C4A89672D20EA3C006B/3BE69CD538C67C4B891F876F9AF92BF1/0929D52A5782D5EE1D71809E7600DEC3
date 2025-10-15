@@ -1,0 +1,1971 @@
+﻿// File: lib/screens/emulator_screen.dart
+import 'dart:io';
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:window_manager/window_manager.dart';
+import 'package:file_picker/file_picker.dart';
+import '../models.dart';
+import '../services/emulator_manager.dart';
+import '../services/emulator_helper.dart';
+import '../services/input_service.dart';
+import '../ui/ps5_theme.dart';
+import '../services/settings_service.dart';
+import '../services/audio_service.dart';
+import 'settings_panel.dart';
+import '../widgets/gamepad_listener.dart';
+
+typedef VoidCb = void Function();
+
+class EmulatorScreen extends StatefulWidget {
+  final EmulatorData emulator;
+  final Future<void> Function()? onChanged;
+
+  const EmulatorScreen({
+    super.key,
+    required this.emulator,
+    this.onChanged,
+  });
+
+  @override
+  State<EmulatorScreen> createState() => _EmulatorScreenState();
+}
+
+class _EmulatorScreenState extends State<EmulatorScreen> {
+  final EmulatorManager _manager = EmulatorManager();
+  final FocusNode _focusNode = FocusNode();
+  final SettingsService _settings = SettingsService.instance;
+
+  int _selectedIndex = 0;
+  bool _scanning = false;
+  static const int _columns = 4;
+
+  bool _wasFullScreenBeforeLaunch = false;
+
+  // Guardar prev callbacks
+  VoidCb? _prevOnLeft;
+  VoidCb? _prevOnRight;
+  VoidCb? _prevOnUp;
+  VoidCb? _prevOnDown;
+  VoidCb? _prevOnActivate;
+  VoidCb? _prevOnBack;
+  VoidCb? _prevOnToggleFs;
+  VoidCb? _prevOnSettings; // para Triángulo
+
+  // --------------------------
+// Menú de acciones por juego (navegable por gamepad)
+// --------------------------
+  Future<void> _openGameActions(GameData game) async {
+    if (!mounted) return;
+    final input = InputService.instance;
+    int focused = 0;
+    final items = [
+      ['Lanzar', Icons.play_arrow],
+      ['Renombrar', Icons.edit],
+      ['Cambiar ícono', Icons.image],
+      ['Eliminar', Icons.delete],
+      ['Cancelar', Icons.close],
+    ];
+
+    // Registrar listener que maneja navegación con gamepad
+    final remover = input.pushListener(InputListener(
+      onLeft: () {
+        focused = (focused - 1) < 0 ? items.length - 1 : focused - 1;
+        _playNav();
+      },
+      onRight: () {
+        focused = (focused + 1) % items.length;
+        _playNav();
+      },
+      onUp: () {
+        focused =
+            (focused - 2) < 0 ? (focused - 2 + items.length) : focused - 2;
+        focused %= items.length;
+        _playNav();
+      },
+      onDown: () {
+        focused = (focused + 2) % items.length;
+        _playNav();
+      },
+      onActivate: () async {
+        _playAction();
+        switch (focused) {
+          case 0:
+            Navigator.pop(context);
+            await _launchGame(game);
+            break;
+          case 1:
+            Navigator.pop(context);
+            final typed =
+                await _showOnScreenKeyboard(initial: game.displayName);
+            if (typed != null && typed.isNotEmpty) {
+              final oldPath = game.path;
+              setState(() => game.displayName = typed);
+              try {
+                await _manager.renameGamePersistent(oldPath, typed);
+              } catch (e) {
+                debugPrint(
+                    'rename persistent error after on-screen keyboard: $e');
+              }
+              if (widget.onChanged != null) await widget.onChanged!();
+              ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Nombre actualizado')));
+            }
+            break;
+          case 2:
+            Navigator.pop(context);
+            await _changeIcon(game);
+            break;
+          case 3:
+            Navigator.pop(context);
+            await _deleteGame(game);
+            break;
+          default:
+            Navigator.pop(context);
+        }
+      },
+      onBack: () => Navigator.pop(context),
+    ));
+
+    // Quitar foco del Grid para que no interfiera con el dialog
+    _focusNode.unfocus();
+
+    // Mostrar dialog con opciones (permite click/tap también)
+    await showDialog(
+      context: context,
+      builder: (c) {
+        return StatefulBuilder(builder: (c, setState) {
+          return AlertDialog(
+            title: Text(game.displayName.isEmpty
+                ? game.path.split(Platform.pathSeparator).last
+                : game.displayName),
+            content: Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: List.generate(items.length, (i) {
+                final isF = i == focused;
+                return GestureDetector(
+                  onTap: () async {
+                    setState(() => focused = i);
+                    _playAction();
+                    switch (i) {
+                      case 0:
+                        Navigator.pop(context);
+                        await _launchGame(game);
+                        break;
+                      case 1:
+                        Navigator.pop(context);
+                        final typed = await _showOnScreenKeyboard(
+                            initial: game.displayName);
+                        if (typed != null && typed.isNotEmpty) {
+                          final oldPath = game.path;
+                          setState(() => game.displayName = typed);
+                          try {
+                            await _manager.renameGamePersistent(oldPath, typed);
+                          } catch (e) {
+                            debugPrint(
+                                'rename persistent error after on-screen keyboard (tap): $e');
+                          }
+                          if (widget.onChanged != null)
+                            await widget.onChanged!();
+                          ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content: Text('Nombre actualizado')));
+                        }
+                        break;
+                      case 2:
+                        Navigator.pop(context);
+                        await _changeIcon(game);
+                        break;
+                      case 3:
+                        Navigator.pop(context);
+                        await _deleteGame(game);
+                        break;
+                      default:
+                        Navigator.pop(context);
+                    }
+                  },
+                  child: Container(
+                    width: 120,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    decoration: BoxDecoration(
+                      color: isF ? Colors.white10 : Colors.white12,
+                      borderRadius: BorderRadius.circular(8),
+                      border: isF
+                          ? Border.all(color: const Color(0xFF66E0FF), width: 2)
+                          : null,
+                    ),
+                    child: Column(children: [
+                      Icon(items[i][1] as IconData, size: 28),
+                      const SizedBox(height: 6),
+                      Text(items[i][0] as String, textAlign: TextAlign.center)
+                    ]),
+                  ),
+                );
+              }),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cerrar'))
+            ],
+          );
+        });
+      },
+    );
+
+    // Remover listener (siempre) y devolver foco
+    try {
+      remover();
+    } catch (_) {}
+    _requestFocus();
+  }
+
+  // Settings listener: para sincronizar volúmenes con AudioService
+  late VoidCallback _settingsListener;
+
+  // flag para indicar panel de settings abierto (evita suspend/resume automáticos)
+  bool _settingsPanelOpen = false;
+
+  // AppBar focus tracking: -1 = none, 0..5 action index
+  int _focusedAppBar =
+      -1; // 0: refresh, 1: folder, 2: settings, 3: save, 4: open emulator, 5: add pc game
+  static const int _appBarActionsCount = 6;
+
+  // Modo acciones (navegación dentro de la tarjeta seleccionada)
+  int _focusedActionIndex = -1; // -1 = no en modo acciones
+
+  @override
+  void initState() {
+    super.initState();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusNode.requestFocus();
+    });
+
+    // Bindear callbacks de input para esta pantalla (guarda prev si es null)
+    _bindInputCallbacks();
+
+    // Sincronizar volúmenes (AudioService ya inicializado en main)
+    AudioService.instance.applyVolumesFromSettings();
+    _settingsListener = () {
+      AudioService.instance.applyVolumesFromSettings();
+    };
+    _settings.masterVolume.addListener(_settingsListener);
+    _settings.sfxVolume.addListener(_settingsListener);
+    _settings.musicVolume.addListener(_settingsListener);
+  }
+
+  @override
+  void dispose() {
+    final input = InputService.instance;
+    // Restaurar callbacks previos
+    input.onLeft = _prevOnLeft;
+    input.onRight = _prevOnRight;
+    input.onUp = _prevOnUp;
+    input.onDown = _prevOnDown;
+    input.onActivate = _prevOnActivate;
+    input.onBack = _prevOnBack;
+    input.onToggleFullscreen = _prevOnToggleFs;
+    input.onSettings = _prevOnSettings;
+    input.onSelect = null;
+    input.onShare = null;
+
+    _focusNode.dispose();
+
+    // Remover listeners de settings
+    _settings.masterVolume.removeListener(_settingsListener);
+    _settings.sfxVolume.removeListener(_settingsListener);
+    _settings.musicVolume.removeListener(_settingsListener);
+
+    super.dispose();
+  }
+
+  // --------------------
+  // Audio helpers (delegan en AudioService)
+  // --------------------
+  void _playNav() => AudioService.instance.playNav();
+  void _playAction() => AudioService.instance.playAction();
+  void _playLaunch() => AudioService.instance.playLaunch();
+
+  // --------------------
+  // Input binding helper
+  // --------------------
+  void _bindInputCallbacks() {
+    final input = InputService.instance;
+
+    // Guardamos los previos solo si aún no los habíamos guardado
+    _prevOnLeft ??= input.onLeft;
+    _prevOnRight ??= input.onRight;
+    _prevOnUp ??= input.onUp;
+    _prevOnDown ??= input.onDown;
+    _prevOnActivate ??= input.onActivate;
+    _prevOnBack ??= input.onBack;
+    _prevOnToggleFs ??= input.onToggleFullscreen;
+    _prevOnSettings ??= input.onSettings;
+
+    // Ligar callbacks para mando + reproducir sonidos
+    input.onLeft = () {
+      // si está enfocado el appbar, moverse entre acciones
+      if (_focusedAppBar != -1) {
+        _playNav();
+        _focusedAppBar = (_focusedAppBar - 1) < 0
+            ? (_appBarActionsCount - 1)
+            : (_focusedAppBar - 1);
+        setState(() {});
+        return;
+      }
+      // si estamos en modo acciones, navegar entre botones
+      if (_focusedActionIndex != -1) {
+        _playNav();
+        final cnt = _actionsCountForSelected();
+        if (cnt > 0) {
+          _focusedActionIndex = (_focusedActionIndex - 1 + cnt) % cnt;
+          setState(() {});
+        }
+        return;
+      }
+      _playNav();
+      _moveLeft();
+    };
+    input.onRight = () {
+      if (_focusedAppBar != -1) {
+        _playNav();
+        _focusedAppBar = (_focusedAppBar + 1) % _appBarActionsCount;
+        setState(() {});
+        return;
+      }
+      if (_focusedActionIndex != -1) {
+        _playNav();
+        final cnt = _actionsCountForSelected();
+        if (cnt > 0) {
+          _focusedActionIndex = (_focusedActionIndex + 1) % cnt;
+          setState(() {});
+        }
+        return;
+      }
+      _playNav();
+      _moveRight();
+    };
+    input.onUp = () {
+      // si ya en appbar, no hacer nada
+      if (_focusedAppBar != -1) return;
+      // si estamos en modo acciones, ignorar up para no cambiar filas
+      if (_focusedActionIndex != -1) {
+        // opcional: podrías salir del modo acciones con up si prefieres
+        _playNav();
+        return;
+      }
+      // si estamos en la primera fila, mover foco al appbar
+      if (_isInTopRow()) {
+        _playNav();
+        _focusedAppBar = 0;
+        setState(() {});
+        return;
+      }
+      _playNav();
+      _moveUp();
+    };
+    input.onDown = () {
+      // si estamos en appbar, bajar al primer elemento (columna correspondiente)
+      if (_focusedAppBar != -1) {
+        _playNav();
+        // map appbar position to approximate grid column
+        final targetCol = _focusedAppBar.clamp(0, _columns - 1);
+        final newIndex = targetCol < widget.emulator.games.length
+            ? targetCol
+            : (widget.emulator.games.isNotEmpty ? 0 : -1);
+        if (newIndex >= 0) {
+          _selectedIndex = newIndex;
+        }
+        _focusedAppBar = -1;
+        setState(() {});
+        _requestFocus();
+        return;
+      }
+
+      // Si estamos en modo acciones, evitar que bajar cambie fila
+      if (_focusedActionIndex != -1) {
+        _playNav();
+        return;
+      }
+
+      _playNav();
+      _moveDown();
+    };
+
+    input.onActivate = () {
+      // si appbar enfocado, activar acción correspondiente
+      if (_focusedAppBar != -1) {
+        _playAction();
+        _activateAppBarAction(_focusedAppBar);
+        return;
+      }
+      // si estamos en modo acciones, ejecutar la acción focalizada
+      if (_focusedActionIndex != -1) {
+        _playAction();
+        _activateFocusedAction();
+        return;
+      }
+      _playAction();
+      _onActivate();
+    };
+    input.onBack = () async {
+      // si appbar enfocado, lo cerramos (volver al grid)
+      if (_focusedAppBar != -1) {
+        _playAction();
+        _focusedAppBar = -1;
+        setState(() {});
+        _requestFocus();
+        return;
+      }
+      // si estamos en modo acciones, salir sin ejecutar
+      if (_focusedActionIndex != -1) {
+        _playAction();
+        setState(() => _focusedActionIndex = -1);
+        _requestFocus();
+        return;
+      }
+      _playAction();
+      await _handleBack();
+    };
+    input.onToggleFullscreen = () => _toggleFullScreen();
+
+    // NUEVO: abrir panel de settings con Select/Share (legacy buttons)
+    input.onSelect = () {
+      _playAction();
+      _openSettingsPanel();
+    };
+    input.onShare = () {
+      _playAction();
+      _openSettingsPanel();
+    };
+
+    // TRIÁNGULO: mapear a onSettings -> toggle modo acciones
+    input.onSettings = () {
+      // si estamos en appbar, ignorar
+      if (_focusedAppBar != -1) return;
+      // si no hay juegos, nada que hacer
+      if (widget.emulator.games.isEmpty) return;
+
+      if (_focusedActionIndex == -1) {
+        _playAction();
+        _focusedActionIndex = 0;
+        setState(() {});
+      } else {
+        _playAction();
+        setState(() => _focusedActionIndex = -1);
+        _requestFocus();
+      }
+    };
+  }
+
+  // --------------------
+  // Activate appbar actions
+  // --------------------
+  Future<void> _activateAppBarAction(int idx) async {
+    switch (idx) {
+      case 0: // refresh
+        _scanGames();
+        break;
+      case 1: // change folder
+        await _changeGamesFolder();
+        break;
+      case 2: // settings
+        await _openSettingsPanel();
+        break;
+      case 3: // save
+        if (widget.onChanged != null) await widget.onChanged!();
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Guardado')));
+        break;
+      case 4: // open emulator exe
+        await _openEmulatorExe();
+        break;
+      case 5: // add PC game (.exe)
+        await _addPcGame();
+        break;
+    }
+  }
+
+  bool _isInTopRow() {
+    // consider top row when selected index is within first row or when no selection
+    if (widget.emulator.games.isEmpty) return true;
+    if (_selectedIndex < 0) return true;
+    return _selectedIndex < _columns;
+  }
+
+  int _actionsCountForSelected() {
+    if (widget.emulator.games.isEmpty || _selectedIndex < 0) return 0;
+    // actualmente tienes 3 botones (renombrar, cambiar icono, eliminar)
+    int c = 0;
+    if (true) c++; // renombrar
+    if (true) c++; // cambiar ícono
+    if (true) c++; // eliminar
+    return c;
+  }
+
+  Future<void> _activateFocusedAction() async {
+    if (_selectedIndex < 0 || _selectedIndex >= widget.emulator.games.length)
+      return;
+    final game = widget.emulator.games[_selectedIndex];
+    final idx = _focusedActionIndex;
+    // salir del modo acciones para que el UI no quede bloqueado
+    setState(() => _focusedActionIndex = -1);
+
+    try {
+      switch (idx) {
+        case 0: // Renombrar: usar teclado en pantalla para gamepad
+          final typed = await _showOnScreenKeyboard(initial: game.displayName);
+          if (typed != null && typed.isNotEmpty) {
+            final oldPath = game.path;
+            setState(() => game.displayName = typed);
+            try {
+              await _manager.renameGamePersistent(oldPath, typed);
+            } catch (e) {
+              debugPrint(
+                  'rename persistent error after on-screen keyboard: $e');
+            }
+            if (widget.onChanged != null) await widget.onChanged!();
+            ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Nombre actualizado')));
+          }
+          break;
+        case 1: // Cambiar ícono
+          await _changeIcon(game);
+          break;
+        case 2: // Eliminar
+          await _deleteGame(game);
+          break;
+        default:
+          break;
+      }
+    } catch (e, st) {
+      debugPrint('_activateFocusedAction error: $e\n$st');
+    } finally {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focusNode.requestFocus();
+      });
+    }
+  }
+
+  // --------------------
+  // Navigation helpers
+  // --------------------
+  void _moveLeft() {
+    final games = widget.emulator.games;
+    if (games.isEmpty) return;
+    setState(() {
+      if (_selectedIndex <= 0) {
+        _selectedIndex = games.length - 1;
+      } else {
+        _selectedIndex--;
+      }
+    });
+    _requestFocus();
+  }
+
+  void _moveRight() {
+    final games = widget.emulator.games;
+    if (games.isEmpty) return;
+    setState(() {
+      _selectedIndex = (_selectedIndex + 1) % games.length;
+    });
+    _requestFocus();
+  }
+
+  void _moveUp() {
+    final games = widget.emulator.games;
+    if (games.isEmpty) return;
+    final posInCol = _selectedIndex % _columns;
+    final rows = (games.length / _columns).ceil();
+    final currRow = (_selectedIndex / _columns).floor();
+    int targetRow = currRow - 1;
+    if (targetRow < 0) targetRow = rows - 1;
+    int target = targetRow * _columns + posInCol;
+    if (target >= games.length) target = games.length - 1;
+    setState(() => _selectedIndex = target);
+    _requestFocus();
+  }
+
+  void _moveDown() {
+    final games = widget.emulator.games;
+    if (games.isEmpty) return;
+    final posInCol = _selectedIndex % _columns;
+    final rows = (games.length / _columns).ceil();
+    final currRow = (_selectedIndex / _columns).floor();
+    int targetRow = currRow + 1;
+    if (targetRow >= rows) targetRow = 0;
+    int target = targetRow * _columns + posInCol;
+    if (target >= games.length) target = games.length - 1;
+    setState(() => _selectedIndex = target);
+    _requestFocus();
+  }
+
+  void _onActivate() {
+    final games = widget.emulator.games;
+    if (games.isEmpty) {
+      _scanGames();
+      return;
+    }
+    if (_selectedIndex < 0 || _selectedIndex >= games.length) return;
+    _launchGame(games[_selectedIndex]);
+  }
+
+  Future<void> _toggleFullScreen() async {
+    try {
+      await InputService.instance.toggleFullscreen();
+    } catch (e) {
+      debugPrint('toggle fullscreen error: $e');
+    }
+  }
+
+  void _requestFocus() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusNode.requestFocus();
+    });
+  }
+
+  Future<void> _handleBack() async {
+    if (widget.onChanged != null) {
+      try {
+        await widget.onChanged!();
+      } catch (e) {
+        debugPrint('onChanged callback error: $e');
+      }
+    }
+    if (mounted) Navigator.pop(context);
+  }
+
+  // --------------------
+  // Scan / Launch / Open EXE / Change folder
+  // --------------------
+  Future<void> _scanGames() async {
+    // Si esta tarjeta es manual (PC), no hacer escaneo automático.
+    if (widget.emulator.manualAddsOnly) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              'Esta tarjeta no realiza escaneos. Usa "Agregar juego" para añadir .exe manualmente.')));
+      return;
+    }
+
+    setState(() => _scanning = true);
+    try {
+      await _manager.scanGamesForEmulator(widget.emulator);
+      if (widget.onChanged != null) await widget.onChanged!();
+      setState(() {
+        if (widget.emulator.games.isEmpty) {
+          _selectedIndex = 0;
+        } else if (_selectedIndex >= widget.emulator.games.length) {
+          _selectedIndex = widget.emulator.games.length - 1;
+        }
+      });
+      _playAction();
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Escaneo completado')));
+    } catch (e) {
+      debugPrint('scan error: $e');
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Error al escanear: $e')));
+    } finally {
+      setState(() => _scanning = false);
+    }
+  }
+
+  // Nuevo helper: unifica el comportamiento repetido de iniciar un proceso y la limpieza cuando sale.
+  Future<void> _startProcessAndHandle(
+    String exe,
+    List<String> args,
+    String wd, {
+    required String startingSnack,
+    required bool playLaunchSound,
+    String? stdoutTag,
+  }) async {
+    if (!File(exe).existsSync()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Archivo no encontrado.')));
+      return;
+    }
+
+    // Suspend input
+    try {
+      debugPrint('EmulatorScreen: suspending input before starting process');
+      await InputService.instance.suspend();
+      debugPrint('EmulatorScreen: input suspended');
+    } catch (e) {
+      debugPrint('Error al suspender InputService antes de lanzar: $e');
+    }
+
+    // Guardar estado fullscreen
+    try {
+      _wasFullScreenBeforeLaunch = await windowManager.isFullScreen();
+    } catch (e) {
+      _wasFullScreenBeforeLaunch = false;
+    }
+
+    // Salir de fullscreen antes de lanzar
+    try {
+      await windowManager.setFullScreen(false);
+      await Future.delayed(const Duration(milliseconds: 180));
+    } catch (_) {}
+
+    debugPrint('Starting process: $exe ${args.join(' ')} (wd: $wd)');
+
+    final Process proc = await Process.start(
+      exe,
+      args,
+      workingDirectory: wd,
+      runInShell: true,
+    );
+
+    // stream outputs (non-blocking)
+    _streamProcessOutput(proc, stdoutTag ?? exe);
+
+    if (playLaunchSound) _playLaunch();
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(startingSnack)));
+
+    proc.exitCode.then((code) async {
+      debugPrint('Process exited with code $code (exe: $exe)');
+      await _handleProcessExitCleanup();
+
+      // re-bind and resume input (if not in settings panel)
+      if (!_settingsPanelOpen) {
+        try {
+          _bindInputCallbacks();
+          await InputService.instance.resume();
+          debugPrint('EmulatorScreen: input resumed and callbacks re-bound');
+        } catch (e) {
+          debugPrint('InputService.resume() error: $e');
+        }
+      }
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focusNode.requestFocus();
+      });
+
+      _wasFullScreenBeforeLaunch = false;
+      debugPrint('Focus and input restored after external process exit.');
+    });
+  }
+
+  Future<void> _streamProcessOutput(Process proc, String tag) async {
+    try {
+      proc.stdout.transform(utf8.decoder).listen((d) {
+        debugPrint('$tag STDOUT: $d');
+      });
+      proc.stderr.transform(utf8.decoder).listen((d) {
+        debugPrint('$tag STDERR: $d');
+      });
+    } catch (e) {
+      debugPrint('streamProcessOutput error: $e');
+    }
+  }
+
+  Future<void> _handleProcessExitCleanup() async {
+    // Common repeated windowManager / focus restore operations
+    try {
+      await Future.delayed(const Duration(milliseconds: 200));
+      await windowManager.show();
+    } catch (e) {
+      debugPrint('windowManager.show() error: $e');
+    }
+    try {
+      await windowManager.restore();
+    } catch (e) {
+      debugPrint('windowManager.restore() error: $e');
+    }
+    try {
+      await windowManager.setAlwaysOnTop(true);
+      await Future.delayed(const Duration(milliseconds: 60));
+      await windowManager.setAlwaysOnTop(false);
+    } catch (e) {
+      debugPrint('alwaysOnTop toggle error: $e');
+    }
+    if (_wasFullScreenBeforeLaunch) {
+      try {
+        await windowManager.setFullScreen(true);
+      } catch (e) {
+        debugPrint('Error al restaurar fullscreen: $e');
+      }
+    }
+    try {
+      await windowManager.focus();
+    } catch (e) {
+      debugPrint('windowManager.focus() error: $e');
+    }
+    await Future.delayed(const Duration(milliseconds: 120));
+  }
+
+  Future<void> _launchGame(GameData game) async {
+    try {
+      // Si la tarjeta está en modo manual (PC), lanzamos EL .exe del juego directamente.
+      if (widget.emulator.manualAddsOnly) {
+        final exePath = game.path;
+        final wd = File(exePath).parent.path;
+        await _startProcessAndHandle(
+          exePath,
+          <String>[],
+          wd,
+          startingSnack: 'Lanzando ${game.displayName}',
+          playLaunchSound: true,
+          stdoutTag: 'PC GAME',
+        );
+        return;
+      }
+
+      // ----------------- comportamiento original para emuladores -----------------
+      final exe = widget.emulator.exePath;
+      if (!File(exe).existsSync()) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Archivo del emulador no encontrado.')));
+        return;
+      }
+
+      final argsFromHelper = EmulatorHelper.buildLaunchArgsForGame(
+        emulatorName: widget.emulator.name,
+        gamePath: game.path,
+        fullscreen: widget.emulator.launchFullscreen,
+        extraArgs: widget.emulator.launchArgs,
+      );
+
+      final lowerName = widget.emulator.name.toLowerCase();
+      final args = <String>[];
+      if (lowerName.contains('dolphin') ||
+          exe.toLowerCase().contains('dolphin')) {
+        args.addAll(['--batch']);
+        if (argsFromHelper.any((a) => a == '-e' || a.startsWith('--exec'))) {
+          args.addAll(argsFromHelper);
+        } else {
+          args.addAll(['--exec=${game.path}']);
+          if (widget.emulator.launchArgs.isNotEmpty) {
+            args.addAll(widget.emulator.launchArgs);
+          }
+        }
+      } else {
+        args.addAll(argsFromHelper);
+      }
+
+      final wd = widget.emulator.workingDirectory ??
+          File(widget.emulator.exePath).parent.path;
+
+      await _startProcessAndHandle(
+        exe,
+        args,
+        wd,
+        startingSnack: 'Lanzando ${game.displayName}',
+        playLaunchSound: true,
+        stdoutTag: 'EMU',
+      );
+    } catch (e, st) {
+      debugPrint('Launch error: $e$st');
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Error al lanzar: $e')));
+    }
+  }
+
+  Future<void> _openEmulatorExe() async {
+    try {
+      final exe = widget.emulator.exePath;
+      if (!File(exe).existsSync()) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Archivo del emulador no encontrado.')));
+        return;
+      }
+
+      final args = List<String>.from(widget.emulator.launchArgs);
+      final wd = widget.emulator.workingDirectory ??
+          File(widget.emulator.exePath).parent.path;
+
+      await _startProcessAndHandle(
+        exe,
+        args,
+        wd,
+        startingSnack: 'Abriendo emulador...',
+        playLaunchSound: false,
+        stdoutTag: 'EMU EXE',
+      );
+    } catch (e, st) {
+      debugPrint('_openEmulatorExe error: $e$st');
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Error al abrir emulador: $e')));
+    }
+  }
+
+  Future<void> _changeGamesFolder() async {
+    try {
+      final path = await FilePicker.platform.getDirectoryPath(
+        dialogTitle:
+            'Selecciona la carpeta de juegos para ${widget.emulator.name}',
+      );
+      if (path == null) return;
+
+      setState(() {
+        widget.emulator.gamesPath = path;
+      });
+
+      await _manager.saveEmulators([widget.emulator]);
+      await _manager.scanGamesForEmulator(widget.emulator,
+          baseDir: Directory(path));
+      if (widget.onChanged != null) await widget.onChanged!();
+
+      _playAction();
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Carpeta actualizada: $path')));
+    } catch (e) {
+      debugPrint('changeGamesFolder error: $e');
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Error cambiando carpeta: $e')));
+    }
+  }
+
+  Future<void> _deleteGame(GameData game) async {
+    final input = InputService.instance;
+    VoidCb? removeListener; // remover del listener stack
+    int focused = 0; // 0 = Cancelar, 1 = Eliminar
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) {
+        return StatefulBuilder(builder: (c, setState) {
+          // registramos el listener UNA VEZ dentro del builder para que pueda usar setState
+          if (removeListener == null) {
+            removeListener = input.pushListener(InputListener(
+              onLeft: () {
+                // moverse a la izquierda (toggle entre los dos botones)
+                focused = (focused - 1) < 0 ? 1 : focused - 1;
+                _playNav();
+                try {
+                  setState(() {});
+                } catch (_) {}
+              },
+              onRight: () {
+                focused = (focused + 1) % 2;
+                _playNav();
+                try {
+                  setState(() {});
+                } catch (_) {}
+              },
+              onUp: () {
+                // opcional: tratar up/down como noop o como toggle
+                _playNav();
+              },
+              onDown: () {
+                _playNav();
+              },
+              onActivate: () {
+                _playAction();
+                if (focused == 1) {
+                  Navigator.of(context).pop(true); // confirmar
+                } else {
+                  Navigator.of(context).pop(false); // cancelar
+                }
+              },
+              onBack: () {
+                _playAction();
+                Navigator.of(context).pop(false);
+              },
+            ));
+          }
+
+          return AlertDialog(
+            title: const Text('Eliminar juego'),
+            content: Text(
+                '¿Eliminar "${game.displayName}" de la lista? (no borra archivo)'),
+            actions: [
+              // Cancelar (índice 0)
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: Text(
+                  'Cancelar',
+                  style: TextStyle(
+                    color: focused == 0 ? const Color(0xFF66E0FF) : null,
+                    fontWeight: focused == 0 ? FontWeight.bold : null,
+                  ),
+                ),
+              ),
+              // Eliminar (índice 1)
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: Text(
+                  'Eliminar',
+                  style: TextStyle(
+                    color: focused == 1 ? Colors.redAccent : null,
+                    fontWeight: focused == 1 ? FontWeight.bold : null,
+                  ),
+                ),
+              ),
+            ],
+          );
+        });
+      },
+    );
+
+    // remover el listener si quedó registrado
+    try {
+      removeListener?.call();
+    } catch (_) {}
+
+    // Si confirm = true, eliminar de la lista (no borra archivo)
+    if (confirm == true) {
+      setState(() {
+        widget.emulator.games.removeWhere((g) => g.path == game.path);
+        if (_selectedIndex >= widget.emulator.games.length) {
+          _selectedIndex = widget.emulator.games.isEmpty
+              ? 0
+              : widget.emulator.games.length - 1;
+        }
+      });
+      _playAction();
+      if (widget.onChanged != null) await widget.onChanged!();
+    } else {
+      // volver a pedir foco a la pantalla principal
+      _requestFocus();
+    }
+  }
+
+  Future<void> _renameGame(GameData game) async {
+    final controller = TextEditingController(text: game.displayName);
+    final result = await showDialog<String?>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Renombrar juego (solo en la app)'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(labelText: 'Nuevo nombre'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, null),
+              child: const Text('Cancelar')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, controller.text.trim()),
+              child: const Text('Guardar')),
+        ],
+      ),
+    );
+
+    if (result != null && result.isNotEmpty) {
+      final oldPath = game.path;
+      setState(() => game.displayName = result);
+      await _manager.renameGamePersistent(oldPath, result);
+      _playAction();
+      if (widget.onChanged != null) await widget.onChanged!();
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Nombre actualizado')));
+    }
+  }
+
+  Future<void> _changeIcon(GameData game) async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'],
+      );
+      if (result == null || result.files.isEmpty) return;
+
+      final path = result.files.single.path;
+      if (path == null) return;
+
+      setState(() => game.coverUrl = path);
+      _playAction();
+
+      if (widget.onChanged != null) {
+        await widget.onChanged!();
+      } else {
+        await _manager.saveEmulators([widget.emulator]);
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Icono/portada actualizada')));
+    } catch (e) {
+      debugPrint('changeIcon error: $e');
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Error al cambiar icono: $e')));
+    }
+  }
+
+  // --------------------
+  // Añadir juego .exe manualmente (solo para tarjetas manualAddsOnly)
+  // --------------------
+  Future<void> _addPcGame() async {
+    try {
+      if (!widget.emulator.manualAddsOnly) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'La función Agregar .exe solo está disponible en tarjetas PC.')));
+        return;
+      }
+
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['exe'],
+      );
+      if (result == null || result.files.isEmpty) return;
+
+      final path = result.files.single.path;
+      if (path == null) return;
+
+      final newGame = GameData(
+        path: path,
+        displayName: EmulatorHelper.cleanGameName(path),
+      );
+
+      setState(() {
+        // evitar duplicados
+        widget.emulator.games.removeWhere((g) => g.path == newGame.path);
+        widget.emulator.games.add(newGame);
+        _selectedIndex = widget.emulator.games.length - 1;
+      });
+
+      // persistir
+      await _manager.saveEmulators([widget.emulator]);
+      if (widget.onChanged != null) await widget.onChanged!();
+
+      _playAction();
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Juego agregado: ${newGame.displayName}')));
+    } catch (e) {
+      debugPrint('_addPcGame error: $e');
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Error agregando .exe: $e')));
+    }
+  }
+
+  Future<String?> _showOnScreenKeyboard({String initial = ''}) async {
+    final input = InputService.instance;
+    final controller = TextEditingController(text: initial);
+    int focused = 0;
+    VoidCb? remover;
+    bool caps = false;
+
+    // efecto visual de teclas presionadas
+    final Set<int> pressed = {};
+
+    // Layout: grid 10 columnas, sin repetición de teclas
+    final List<String> keys = <String>[
+      '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', // row1
+      'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', // row2
+      'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', 'ñ', // row3
+      'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '-', // row4
+      'CAPS', 'SPACE', 'LEFT', 'RIGHT', 'BACK', 'CLEAR', 'OK', 'CANCEL', '',
+      '' // row5
+    ];
+
+    const int cols = 10;
+
+    // ===== Estilo de tecla (inspirado en el mock) =====
+    Widget _keyTile(String label, bool isFocused, bool isPressed) {
+      String display;
+      switch (label) {
+        case 'SPACE':
+          display = 'ESPACIO';
+          break;
+        case 'BACK':
+          display = '⌫';
+          break;
+        case 'OK':
+          display = 'ACEPTAR';
+          break;
+        case 'CANCEL':
+          display = 'CANCELAR';
+          break;
+        case 'CAPS':
+          display = caps ? 'MAYÚS' : 'mayús';
+          break;
+        case 'LEFT':
+          display = '◄';
+          break;
+        case 'RIGHT':
+          display = '►';
+          break;
+        case 'CLEAR':
+          display = 'LIMPIAR';
+          break;
+        default:
+          display = caps ? label.toUpperCase() : label.toLowerCase();
+      }
+
+      // Colores base
+      const Color accent = Color(0xFF66E0FF); // cian
+      const Color keyBg = Color(0x0F000000); // negro translúcido muy sutil
+      const Color keyBgFocused = Color(0x18FFFFFF); // highlight sutil
+      const Color keyBgPressed = Color(0x26FFFFFF); // pressed más visible
+      const Color keyBorder = Color(0x14FFFFFF); // borde tenue
+
+      final bg = isPressed ? keyBgPressed : (isFocused ? keyBgFocused : keyBg);
+      final border = isFocused
+          ? Border.all(color: accent.withOpacity(0.95), width: 2.2)
+          : Border.all(color: keyBorder, width: 1.0);
+
+      final scale = isPressed ? 0.96 : 1.0;
+
+      return AnimatedContainer(
+        duration: const Duration(milliseconds: 110),
+        transform: Matrix4.identity()..scale(scale, scale),
+        curve: Curves.easeOutCubic,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(12),
+          border: border,
+          boxShadow: isFocused
+              ? [
+                  BoxShadow(
+                    color: accent.withOpacity(0.07),
+                    blurRadius: 10,
+                    offset: const Offset(0, 3),
+                  )
+                ]
+              : null,
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+        child: Text(
+          display,
+          style: TextStyle(
+            color: Colors.white,
+            fontWeight:
+                isFocused || isPressed ? FontWeight.w700 : FontWeight.w600,
+            fontSize: display.length > 6 ? 12 : 14,
+          ),
+          textAlign: TextAlign.center,
+        ),
+      );
+    }
+
+    // ===== Lógica de activación (gamepad) =====
+    void attachInputListener(StateSetter setState) {
+      remover = input.pushListener(InputListener(
+        onLeft: () {
+          focused = (focused - 1) < 0 ? keys.length - 1 : focused - 1;
+          _playNav();
+          try {
+            setState(() {});
+          } catch (_) {}
+        },
+        onRight: () {
+          focused = (focused + 1) % keys.length;
+          _playNav();
+          try {
+            setState(() {});
+          } catch (_) {}
+        },
+        onUp: () {
+          focused = (focused - cols) < 0
+              ? (focused - cols + keys.length)
+              : focused - cols;
+          focused %= keys.length;
+          _playNav();
+          try {
+            setState(() {});
+          } catch (_) {}
+        },
+        onDown: () {
+          focused = (focused + cols) % keys.length;
+          _playNav();
+          try {
+            setState(() {});
+          } catch (_) {}
+        },
+        onActivate: () async {
+          // efecto visual
+          pressed.add(focused);
+          try {
+            setState(() {});
+          } catch (_) {}
+          await Future.delayed(const Duration(milliseconds: 120));
+
+          final key = keys[focused];
+          _playAction();
+
+          if (key == 'OK') {
+            Navigator.of(context).pop(controller.text.trim());
+          } else if (key == 'CANCEL' || key == '') {
+            Navigator.of(context).pop(null);
+          } else if (key == 'BACK') {
+            final sel = controller.selection;
+            final pos = sel.baseOffset.clamp(0, controller.text.length);
+            if (pos > 0) {
+              controller.text = controller.text.replaceRange(pos - 1, pos, '');
+              controller.selection = TextSelection.collapsed(offset: pos - 1);
+            }
+          } else if (key == 'SPACE') {
+            final sel = controller.selection;
+            final pos = sel.baseOffset.clamp(0, controller.text.length);
+            controller.text = controller.text.replaceRange(pos, pos, ' ');
+            controller.selection = TextSelection.collapsed(offset: pos + 1);
+          } else if (key == 'CAPS') {
+            caps = !caps;
+          } else if (key == 'LEFT') {
+            final pos = controller.selection.baseOffset
+                .clamp(0, controller.text.length);
+            final newPos = (pos - 1) < 0 ? 0 : pos - 1;
+            controller.selection = TextSelection.collapsed(offset: newPos);
+          } else if (key == 'RIGHT') {
+            final pos = controller.selection.baseOffset
+                .clamp(0, controller.text.length);
+            final newPos = (pos + 1) > controller.text.length
+                ? controller.text.length
+                : pos + 1;
+            controller.selection = TextSelection.collapsed(offset: newPos);
+          } else if (key == 'CLEAR') {
+            controller.clear();
+            controller.selection = const TextSelection.collapsed(offset: 0);
+          } else {
+            // insertar letra/número en cursor
+            final toAdd = caps ? key.toUpperCase() : key.toLowerCase();
+            final sel = controller.selection;
+            final pos = sel.baseOffset.clamp(0, controller.text.length);
+            controller.text = controller.text.replaceRange(pos, pos, toAdd);
+            controller.selection =
+                TextSelection.collapsed(offset: pos + toAdd.length);
+          }
+
+          // quitar efecto visual
+          pressed.remove(focused);
+          try {
+            setState(() {});
+          } catch (_) {}
+        },
+        onBack: () {
+          _playAction();
+          Navigator.of(context).pop(null);
+        },
+      ));
+    }
+
+    // ===== Mostrar diálogo con diseño estilizado =====
+    final result = await showDialog<String?>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return StatefulBuilder(builder: (ctx, setState) {
+          if (remover == null) attachInputListener(setState);
+
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            insetPadding:
+                const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 980),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF0B0B0D), Color(0xFF111213)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.white10, width: 1),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.6),
+                    blurRadius: 30,
+                    offset: const Offset(0, 8),
+                  ),
+                  BoxShadow(
+                    color: const Color(0xFF66E0FF).withOpacity(0.03),
+                    blurRadius: 6,
+                    offset: const Offset(0, 2),
+                    spreadRadius: 1,
+                  ),
+                ],
+              ),
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Campo de texto + icono controller
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: controller,
+                          autofocus: true,
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 18),
+                          decoration: InputDecoration(
+                            hintText: 'Escribe aquí...',
+                            hintStyle: const TextStyle(color: Colors.white54),
+                            filled: true,
+                            fillColor: const Color(
+                                0x0FFFFFFF), // sutil blanco translúcido
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide.none,
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 12),
+                          ),
+                          onChanged: (_) {
+                            try {
+                              setState(() {});
+                            } catch (_) {}
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: const [
+                          Icon(Icons.gamepad, color: Color(0xFF66E0FF)),
+                          SizedBox(height: 6),
+                          Text('Controller',
+                              style: TextStyle(
+                                  color: Colors.white70, fontSize: 12)),
+                        ],
+                      )
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+
+                  // Grid de teclas
+                  SizedBox(
+                    height: 320,
+                    child: GridView.builder(
+                      physics: const NeverScrollableScrollPhysics(),
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: cols,
+                        crossAxisSpacing: 8,
+                        mainAxisSpacing: 8,
+                        childAspectRatio: 1.6,
+                      ),
+                      itemCount: keys.length,
+                      itemBuilder: (context, i) {
+                        final k = keys[i];
+                        if (k.isEmpty) return const SizedBox.shrink();
+                        final isFocused = i == focused;
+                        final isPressed = pressed.contains(i);
+
+                        return GestureDetector(
+                          onTap: () async {
+                            _playAction();
+                            // efecto visual tap
+                            pressed.add(i);
+                            try {
+                              setState(() {});
+                            } catch (_) {}
+                            await Future.delayed(
+                                const Duration(milliseconds: 120));
+
+                            // ejecutar la misma lógica que en onActivate
+                            final key = k;
+                            if (key == 'OK') {
+                              Navigator.of(context).pop(controller.text.trim());
+                              pressed.remove(i);
+                              try {
+                                setState(() {});
+                              } catch (_) {}
+                              return;
+                            }
+                            if (key == 'CANCEL') {
+                              Navigator.of(context).pop(null);
+                              pressed.remove(i);
+                              try {
+                                setState(() {});
+                              } catch (_) {}
+                              return;
+                            }
+                            if (key == 'BACK') {
+                              final pos = controller.selection.baseOffset
+                                  .clamp(0, controller.text.length);
+                              if (pos > 0) {
+                                controller.text = controller.text
+                                    .replaceRange(pos - 1, pos, '');
+                                controller.selection =
+                                    TextSelection.collapsed(offset: pos - 1);
+                              }
+                              pressed.remove(i);
+                              try {
+                                setState(() {});
+                              } catch (_) {}
+                              return;
+                            }
+                            if (key == 'SPACE') {
+                              final pos = controller.selection.baseOffset
+                                  .clamp(0, controller.text.length);
+                              controller.text =
+                                  controller.text.replaceRange(pos, pos, ' ');
+                              controller.selection =
+                                  TextSelection.collapsed(offset: pos + 1);
+                              pressed.remove(i);
+                              try {
+                                setState(() {});
+                              } catch (_) {}
+                              return;
+                            }
+                            if (key == 'CAPS') {
+                              caps = !caps;
+                              pressed.remove(i);
+                              try {
+                                setState(() {});
+                              } catch (_) {}
+                              return;
+                            }
+                            if (key == 'LEFT') {
+                              final pos = controller.selection.baseOffset
+                                  .clamp(0, controller.text.length);
+                              controller.selection = TextSelection.collapsed(
+                                  offset: (pos - 1)
+                                      .clamp(0, controller.text.length));
+                              pressed.remove(i);
+                              try {
+                                setState(() {});
+                              } catch (_) {}
+                              return;
+                            }
+                            if (key == 'RIGHT') {
+                              final pos = controller.selection.baseOffset
+                                  .clamp(0, controller.text.length);
+                              controller.selection = TextSelection.collapsed(
+                                  offset: (pos + 1)
+                                      .clamp(0, controller.text.length));
+                              pressed.remove(i);
+                              try {
+                                setState(() {});
+                              } catch (_) {}
+                              return;
+                            }
+                            if (key == 'CLEAR') {
+                              controller.clear();
+                              controller.selection =
+                                  const TextSelection.collapsed(offset: 0);
+                              pressed.remove(i);
+                              try {
+                                setState(() {});
+                              } catch (_) {}
+                              return;
+                            }
+
+                            // letra / número: insertar en cursor
+                            final toAdd =
+                                caps ? key.toUpperCase() : key.toLowerCase();
+                            final pos = controller.selection.baseOffset
+                                .clamp(0, controller.text.length);
+                            controller.text =
+                                controller.text.replaceRange(pos, pos, toAdd);
+                            controller.selection = TextSelection.collapsed(
+                                offset: pos + toAdd.length);
+
+                            // remover efecto
+                            pressed.remove(i);
+                            try {
+                              setState(() {});
+                            } catch (_) {}
+                          },
+                          child: _keyTile(k, isFocused, isPressed),
+                        );
+                      },
+                    ),
+                  ),
+
+                  const SizedBox(height: 12),
+                  // (botones finales eliminados por petición)
+                ],
+              ),
+            ),
+          );
+        });
+      },
+    );
+
+    // remover listener si quedó
+    try {
+      remover?.call();
+    } catch (_) {}
+
+    return result;
+  }
+
+  // --------------------
+  // Keyboard handling
+  // --------------------
+  void _onRawKey(RawKeyEvent event) {
+    if (event is! RawKeyDownEvent) return;
+
+    final key = event.logicalKey;
+    // if appbar focused, handle left/right/enter/esc specially
+    if (_focusedAppBar != -1) {
+      if (key == LogicalKeyboardKey.arrowLeft) {
+        _playNav();
+        setState(() => _focusedAppBar = (_focusedAppBar - 1) < 0
+            ? (_appBarActionsCount - 1)
+            : (_focusedAppBar - 1));
+        return;
+      } else if (key == LogicalKeyboardKey.arrowRight) {
+        _playNav();
+        setState(
+            () => _focusedAppBar = (_focusedAppBar + 1) % _appBarActionsCount);
+        return;
+      } else if (key == LogicalKeyboardKey.enter ||
+          key == LogicalKeyboardKey.numpadEnter) {
+        _playAction();
+        _activateAppBarAction(_focusedAppBar);
+        return;
+      } else if (key == LogicalKeyboardKey.escape ||
+          key == LogicalKeyboardKey.goBack) {
+        _playAction();
+        setState(() => _focusedAppBar = -1);
+        _requestFocus();
+        return;
+      }
+    }
+
+    // Si estamos en modo acciones, procesar flechas y Enter/Escape
+    if (_focusedActionIndex != -1) {
+      if (key == LogicalKeyboardKey.arrowLeft) {
+        _playNav();
+        final cnt = _actionsCountForSelected();
+        _focusedActionIndex = (_focusedActionIndex - 1 + cnt) % cnt;
+        setState(() {});
+        return;
+      } else if (key == LogicalKeyboardKey.arrowRight) {
+        _playNav();
+        final cnt = _actionsCountForSelected();
+        _focusedActionIndex = (_focusedActionIndex + 1) % cnt;
+        setState(() {});
+        return;
+      } else if (key == LogicalKeyboardKey.enter ||
+          key == LogicalKeyboardKey.numpadEnter) {
+        _playAction();
+        _activateFocusedAction();
+        return;
+      } else if (key == LogicalKeyboardKey.escape ||
+          key == LogicalKeyboardKey.goBack) {
+        _playAction();
+        setState(() => _focusedActionIndex = -1);
+        _requestFocus();
+        return;
+      }
+    }
+
+    if (key == LogicalKeyboardKey.arrowDown) {
+      _playNav();
+      _moveDown();
+    } else if (key == LogicalKeyboardKey.arrowUp) {
+      _playNav();
+      // if in top row, move to appbar
+      if (_isInTopRow()) {
+        setState(() => _focusedAppBar = 0);
+        return;
+      }
+      _moveUp();
+    } else if (key == LogicalKeyboardKey.arrowLeft) {
+      _playNav();
+      _moveLeft();
+    } else if (key == LogicalKeyboardKey.arrowRight) {
+      _playNav();
+      _moveRight();
+    } else if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      _playAction();
+      _onActivate();
+    } else if (key == LogicalKeyboardKey.escape ||
+        key == LogicalKeyboardKey.goBack) {
+      _playAction();
+      _handleBack();
+    } else if (key == LogicalKeyboardKey.f11) {
+      _toggleFullScreen();
+    }
+  }
+
+  // --------------------
+  // Abrir panel de settings (pushListener inline, sin helper externo)
+  // --------------------
+  Future<void> _openSettingsPanel() async {
+    if (!mounted) return;
+
+    final controller = SettingsPanelController();
+    final input = InputService.instance;
+
+    // crear listener que forwardee eventos al controller del panel
+    final settingsListener = InputListener(
+      onLeft: () => controller.onLeft?.call(),
+      onRight: () => controller.onRight?.call(),
+      onUp: () => controller.onUp?.call(),
+      onDown: () => controller.onDown?.call(),
+      onActivate: () => controller.onActivate?.call(),
+      onBack: () => controller.onBack?.call(),
+      onToggleFullscreen: () {},
+      onSelect: () {},
+      onShare: () => controller.onReset?.call(),
+      onSettings: () => controller.onApply?.call(),
+    );
+
+    // push y obtenemos remover
+    final removeListener = input.pushListener(settingsListener);
+
+    // unfocus para evitar doble handle de teclado
+    _focusNode.unfocus();
+
+    // Optional: si quieres detener efectos o música, hazlo aquí
+    try {
+      // aplicar volúmenes runtime por si el panel actualiza música en vivo
+      AudioService.instance.applyVolumesFromSettings();
+    } catch (_) {}
+
+    _settingsPanelOpen = true;
+
+    try {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => SettingsPanel(controller: controller, asRoute: true),
+          fullscreenDialog: true,
+        ),
+      );
+    } finally {
+      // remover listener temporal
+      try {
+        removeListener();
+      } catch (_) {}
+
+      _settingsPanelOpen = false;
+
+      // re-bindear callbacks del emulador y reanudar input
+      try {
+        _bindInputCallbacks();
+        await InputService.instance.resume();
+      } catch (e) {
+        debugPrint('Error rebind/resume InputService after settings: $e');
+        _bindInputCallbacks();
+      }
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focusNode.requestFocus();
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final games = widget.emulator.games;
+    final bg = EmulatorHelper.getEmulatorBackground(widget.emulator.name);
+    return WillPopScope(
+      onWillPop: () async {
+        await _handleBack();
+        return false;
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(widget.emulator.name.toUpperCase()),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () {
+              _playAction();
+              _handleBack();
+            },
+          ),
+          actions: [
+            // Each action is wrapped so we can show focused state when controller
+            _buildAppBarAction(
+              icon: Icons.refresh,
+              tooltip: 'Escanear juegos',
+              index: 0,
+              onPressed: () {
+                if (_scanning) return;
+                _playAction();
+                _scanGames();
+              },
+            ),
+            _buildAppBarAction(
+              icon: Icons.folder_open,
+              tooltip: 'Cambiar carpeta de juegos',
+              index: 1,
+              onPressed: () {
+                _playAction();
+                _changeGamesFolder();
+              },
+            ),
+            _buildAppBarAction(
+              icon: Icons.settings,
+              tooltip: 'Abrir panel de ajustes',
+              index: 2,
+              onPressed: () {
+                _playAction();
+                _openSettingsPanel();
+              },
+            ),
+            _buildAppBarAction(
+              icon: Icons.save,
+              tooltip: 'Forzar guardar',
+              index: 3,
+              onPressed: () async {
+                _playAction();
+                if (widget.onChanged != null) await widget.onChanged!();
+                ScaffoldMessenger.of(context)
+                    .showSnackBar(const SnackBar(content: Text('Guardado')));
+              },
+            ),
+            // Nuevo: boton para abrir el ejecutable del emulador
+            _buildAppBarAction(
+              icon: Icons.play_arrow,
+              tooltip: 'Abrir emulador',
+              index: 4,
+              onPressed: () async {
+                _playAction();
+                await _openEmulatorExe();
+              },
+            ),
+
+            // Nuevo (solo visible en tarjetas manualAddsOnly / PC): Agregar .exe
+            if (widget.emulator.manualAddsOnly)
+              _buildAppBarAction(
+                icon: Icons.add_box,
+                tooltip: 'Agregar juego (.exe)',
+                index: 5,
+                onPressed: () async {
+                  _playAction();
+                  await _addPcGame();
+                },
+              ),
+          ],
+        ),
+        body: RawKeyboardListener(
+          focusNode: _focusNode,
+          onKey: _onRawKey,
+          child: Container(
+            decoration: BoxDecoration(
+              image: DecorationImage(
+                image: AssetImage(bg),
+                fit: BoxFit.cover,
+              ),
+            ),
+            child: Column(
+              children: [
+                if (widget.emulator.gamesPath != null)
+                  Padding(
+                    padding: const EdgeInsets.all(8.0),
+                    child: Text('Carpeta: ${widget.emulator.gamesPath}',
+                        style: const TextStyle(fontSize: 12)),
+                  ),
+                Expanded(
+                  child: games.isEmpty
+                      ? const Center(
+                          child: Text('No se encontraron juegos',
+                              style: TextStyle(color: Colors.white)))
+                      : GridView.builder(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 20, vertical: 12),
+                          gridDelegate:
+                              const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: _columns,
+                            crossAxisSpacing: 20,
+                            mainAxisSpacing: 20,
+                            childAspectRatio: 1.2,
+                          ),
+                          itemCount: games.length,
+                          itemBuilder: (context, i) {
+                            final g = games[i];
+                            final selected =
+                                i == _selectedIndex && _focusedAppBar == -1;
+
+                            String? coverPath;
+                            try {
+                              if (g.coverUrl != null &&
+                                  g.coverUrl!.isNotEmpty &&
+                                  File(g.coverUrl!).existsSync()) {
+                                coverPath = g.coverUrl!;
+                              }
+                            } catch (_) {
+                              coverPath = null;
+                            }
+
+                            final Widget? subtitleWidget = coverPath == null
+                                ? Padding(
+                                    padding: const EdgeInsets.only(top: 6.0),
+                                    child: Text(
+                                      g.path,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontSize: 11),
+                                    ),
+                                  )
+                                : null;
+
+                            final isActionMode =
+                                selected && _focusedActionIndex != -1;
+                            final actionFocusedIndexForThis =
+                                isActionMode ? _focusedActionIndex : -1;
+
+                            return PS5EmulatorCard(
+                              title: g.displayName.isEmpty
+                                  ? g.path.split(Platform.pathSeparator).last
+                                  : g.displayName,
+                              iconAsset: EmulatorHelper.getEmulatorIcon(
+                                  widget.emulator.name),
+                              isSelected: selected,
+                              coverPath: coverPath,
+                              actionMode: isActionMode,
+                              actionFocusedIndex: actionFocusedIndexForThis,
+                              onTap: () {
+                                setState(() {
+                                  _selectedIndex = i;
+                                  _focusedActionIndex = -1;
+                                });
+                                _playAction();
+                                _launchGame(g);
+                              },
+                              onLongPress: () {
+                                setState(() {
+                                  _selectedIndex = i;
+                                  _focusedActionIndex = 0;
+                                });
+                                _playAction();
+                                _openGameActions(g);
+                              },
+                              onDelete: () {
+                                _playAction();
+                                _deleteGame(g);
+                              },
+                              onRename: () {
+                                _playAction();
+                                _renameGame(g);
+                              },
+                              onChangeIcon: () {
+                                _playAction();
+                                _changeIcon(g);
+                              },
+                              subtitle: subtitleWidget,
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAppBarAction({
+    required IconData icon,
+    required String tooltip,
+    required int index,
+    required VoidCb onPressed,
+  }) {
+    final focused = _focusedAppBar == index;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6.0),
+      child: GestureDetector(
+        onTap: onPressed,
+        child: Container(
+          decoration: focused
+              ? BoxDecoration(
+                  border:
+                      Border.all(color: const Color(0xFF66E0FF), width: 2.0),
+                  borderRadius: BorderRadius.circular(6.0),
+                )
+              : null,
+          child: IconButton(
+            icon: Icon(icon, color: focused ? Colors.white : Colors.white70),
+            tooltip: tooltip,
+            onPressed: onPressed,
+          ),
+        ),
+      ),
+    );
+  }
+}

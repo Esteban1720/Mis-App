@@ -1,0 +1,346 @@
+﻿import 'dart:async';
+import 'package:flutter/material.dart';
+import '../services/input_service.dart';
+import '../services/audio_service.dart';
+
+/// Teclado en pantalla navegable con mando/teclado/mouse.
+/// - `isPin == true` muestra solo dígitos, BACK, OK y CANCEL (3 columnas).
+/// - `isPin == false` muestra teclado completo (10 columnas) similar al de emulator_screen.
+class OnScreenKeyboard extends StatefulWidget {
+  final String initialValue;
+  final String title;
+  final int maxLength;
+  final bool isPin;
+
+  const OnScreenKeyboard({
+    Key? key,
+    required this.initialValue,
+    required this.title,
+    required this.maxLength,
+    this.isPin = false,
+  }) : super(key: key);
+
+  @override
+  State<OnScreenKeyboard> createState() => _OnScreenKeyboardState();
+}
+
+class _OnScreenKeyboardState extends State<OnScreenKeyboard> {
+  late TextEditingController _controller;
+  late List<String> _keys;
+  late int _cols;
+  int _focused = 0;
+  final Set<int> _pressed = {};
+  VoidCallback? _removeListener;
+  bool _caps = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialValue ?? '');
+    _initLayout();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _attachInput();
+    });
+  }
+
+  @override
+  void dispose() {
+    _removeListener?.call();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _initLayout() {
+    if (widget.isPin) {
+      _keys = [
+        '1','2','3',
+        '4','5','6',
+        '7','8','9',
+        'BACK','0','OK',
+        'CANCEL',
+      ];
+      _cols = 3;
+    } else {
+      _keys = <String>[
+        '1','2','3','4','5','6','7','8','9','0',
+        'q','w','e','r','t','y','u','i','o','p',
+        'a','s','d','f','g','h','j','k','l','ñ',
+        'z','x','c','v','b','n','m',',','.','-',
+        'CAPS','SPACE','LEFT','RIGHT','BACK','CLEAR','OK','CANCEL'
+      ];
+      _cols = 10;
+    }
+    if (_focused >= _keys.length) _focused = 0;
+  }
+
+  void _playNav() => AudioService.instance.playNav();
+  void _playAction() => AudioService.instance.playAction();
+
+  void _attachInput() {
+    final input = InputService.instance;
+    _removeListener = input.pushListener(InputListener(
+      onLeft: () {
+        _playNav();
+        setState(() {
+          final rowStart = (_focused ~/ _cols) * _cols;
+          final rel = _focused - rowStart;
+          final newRel = (rel - 1) < 0 ? (_cols - 1) : (rel - 1);
+          int cand = rowStart + newRel;
+          if (cand >= _keys.length) cand = rowStart;
+          _focused = cand;
+        });
+      },
+      onRight: () {
+        _playNav();
+        setState(() {
+          final rowStart = (_focused ~/ _cols) * _cols;
+          final rel = _focused - rowStart;
+          final newRel = (rel + 1) % _cols;
+          int cand = rowStart + newRel;
+          if (cand >= _keys.length) cand = rowStart;
+          _focused = cand;
+        });
+      },
+      onUp: () {
+        _playNav();
+        setState(() {
+          final cand = (_focused - _cols);
+          if (cand < 0) {
+            int col = _focused % _cols;
+            int lastRowStart = ((_keys.length - 1) ~/ _cols) * _cols;
+            int target = lastRowStart + col;
+            if (target >= _keys.length) target = _keys.length - 1;
+            _focused = target;
+          } else {
+            _focused = cand;
+          }
+        });
+      },
+      onDown: () {
+        _playNav();
+        setState(() {
+          final cand = (_focused + _cols);
+          if (cand >= _keys.length) {
+            int col = _focused % _cols;
+            _focused = col < _keys.length ? col : 0;
+          } else {
+            _focused = cand;
+          }
+        });
+      },
+      onActivate: () async {
+        await _activateAt(_focused);
+      },
+      onBack: () {
+        _playAction();
+        Navigator.of(context).pop(null);
+      },
+    ));
+  }
+
+  void _activateLeft() {
+    final pos = _controller.selection.baseOffset.clamp(0, _controller.text.length);
+    final newPos = (pos - 1) < 0 ? 0 : pos - 1;
+    _controller.selection = TextSelection.collapsed(offset: newPos);
+    setState(() {});
+  }
+
+  void _activateRight() {
+    final pos = _controller.selection.baseOffset.clamp(0, _controller.text.length);
+    final newPos = (pos + 1) > _controller.text.length ? _controller.text.length : pos + 1;
+    _controller.selection = TextSelection.collapsed(offset: newPos);
+    setState(() {});
+  }
+
+  Future<void> _activateAt(int idx) async {
+    _playAction();
+    final key = _keys[idx];
+    setState(() => _pressed.add(idx));
+    await Future.delayed(const Duration(milliseconds: 120));
+    if (key == 'OK') {
+      Navigator.of(context).pop(_controller.text.trim());
+    } else if (key == 'CANCEL') {
+      Navigator.of(context).pop(null);
+    } else if (key == 'BACK') {
+      final pos = _controller.selection.baseOffset.clamp(0, _controller.text.length);
+      if (pos > 0) {
+        _controller.text = _controller.text.replaceRange(pos - 1, pos, '');
+        _controller.selection = TextSelection.collapsed(offset: pos - 1);
+      }
+    } else if (key == 'SPACE') {
+      final pos = _controller.selection.baseOffset.clamp(0, _controller.text.length);
+      // Solo permitir espacio si no es PIN
+      if (!widget.isPin) {
+        _controller.text = _controller.text.replaceRange(pos, pos, ' ');
+        _controller.selection = TextSelection.collapsed(offset: pos + 1);
+      }
+    } else if (key == 'CLEAR') {
+      _controller.clear();
+      _controller.selection = const TextSelection.collapsed(offset: 0);
+      setState(() {});
+    } else if (key == 'CAPS') {
+      setState(() => _caps = !_caps);
+    } else if (key == 'LEFT') {
+      _activateLeft();
+    } else if (key == 'RIGHT') {
+      _activateRight();
+    } else {
+      final toAdd = _caps ? key.toUpperCase() : key.toLowerCase();
+      final sel = _controller.selection;
+      final pos = sel.baseOffset.clamp(0, _controller.text.length);
+      // Solo permitir dígitos si es PIN
+      if (widget.isPin) {
+        if (RegExp(r'^[0-9]$').hasMatch(toAdd) && _controller.text.length < widget.maxLength) {
+          _controller.text = _controller.text.replaceRange(pos, pos, toAdd);
+          _controller.selection = TextSelection.collapsed(offset: pos + toAdd.length);
+        }
+      } else {
+        if (_controller.text.length < widget.maxLength) {
+          _controller.text = _controller.text.replaceRange(pos, pos, toAdd);
+          _controller.selection = TextSelection.collapsed(offset: pos + toAdd.length);
+        }
+      }
+    }
+    setState(() => _pressed.remove(idx));
+  }
+
+  Widget _keyTile(String label, bool isFocused, bool isPressed, double fontSize) {
+    String display = label;
+    if (label == 'SPACE') display = 'ESPACIO';
+    if (label == 'BACK') display = '⌫';
+    if (label == 'OK') display = 'ACEPTAR';
+    if (label == 'CANCEL') display = 'CANCELAR';
+    if (label == 'CAPS') display = _caps ? 'MAYÚS' : 'mayús';
+    if (label == 'CLEAR') display = 'LIMPIAR';
+    if (label == 'LEFT') display = '◄';
+    if (label == 'RIGHT') display = '►';
+    if (label == 'ñ') display = _caps ? 'Ñ' : 'ñ';
+    // Visualizar letras en mayúsculas si _caps está activo
+    if (_caps && label.length == 1 && RegExp(r'^[a-zA-Z]$').hasMatch(label)) {
+      display = label.toUpperCase();
+    }
+    final accent = const Color(0xFF66E0FF);
+    final bg = isPressed
+        ? Colors.white24
+        : (isFocused ? accent.withOpacity(0.18) : Colors.white10);
+    final border = isFocused
+        ? Border.all(color: accent, width: 2.0)
+        : Border.all(color: Colors.white12, width: 1.0);
+    final scale = isPressed ? 0.96 : 1.0;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 110),
+      transform: Matrix4.identity()..scale(scale, scale),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(12),
+        border: border,
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+      child: Text(
+        display,
+        style: TextStyle(
+          color: isFocused ? Colors.black : Colors.white,
+          fontWeight: isFocused || isPressed ? FontWeight.w800 : FontWeight.w600,
+          fontSize: fontSize,
+        ),
+        textAlign: TextAlign.center,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: widget.isPin
+          ? const EdgeInsets.symmetric(horizontal: 120, vertical: 80)
+          : const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+      child: LayoutBuilder(builder: (context, constraints) {
+        final maxW = constraints.maxWidth.clamp(320.0, 980.0);
+        final tileFont = widget.isPin ? 22.0 : 16.0;
+        final childAspect = widget.isPin ? 1.2 : (maxW / (_cols * 64));
+        final dialogWidth = widget.isPin ? 360.0 : maxW;
+        // Alto suficiente para mostrar todas las filas del teclado PIN
+        final dialogHeight = widget.isPin ? 520.0 : null;
+
+        return Center(
+          child: Container(
+            width: dialogWidth,
+            constraints: widget.isPin
+                ? const BoxConstraints(maxWidth: 360, maxHeight: 520)
+                : BoxConstraints(maxWidth: maxW),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0F1113),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.white10, width: 1),
+            ),
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(widget.title,
+                          style: const TextStyle(color: Colors.white, fontSize: 18)),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.of(context).pop(null),
+                      icon: const Icon(Icons.close, color: Colors.white70),
+                    )
+                  ],
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _controller,
+                  maxLength: widget.maxLength,
+                  obscureText: widget.isPin,
+                  keyboardType: widget.isPin ? TextInputType.number : TextInputType.text,
+                  autofocus: true,
+                  style: const TextStyle(color: Colors.white, fontSize: 18),
+                  decoration: InputDecoration(
+                    filled: true,
+                    fillColor: Colors.white10,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                  ),
+                  onChanged: (_) => setState(() {}),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  height: widget.isPin ? 360 : 360, // Alto suficiente para todas las filas PIN
+                  child: GridView.builder(
+                    physics: const NeverScrollableScrollPhysics(),
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: _cols,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 10,
+                      childAspectRatio: widget.isPin ? 1.2 : 1.4,
+                    ),
+                    itemCount: _keys.length,
+                    itemBuilder: (context, i) {
+                      final k = _keys[i];
+                      final isFocused = i == _focused;
+                      final isPressed = _pressed.contains(i);
+                      final fs = widget.isPin ? 22.0 : (k.length > 3 ? 13.0 : 16.0);
+                      return GestureDetector(
+                        onTap: () async => await _activateAt(i),
+                        child: _keyTile(k, isFocused, isPressed, fs),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 10),
+              ],
+            ),
+          ),
+        );
+      }),
+    );
+  }
+}
