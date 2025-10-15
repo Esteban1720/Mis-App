@@ -1,0 +1,34 @@
+// Audio settings logic for SettingsService
+import 'package:flutter/material.dart';
+
+class SettingsAudio {
+  final ValueNotifier<double> masterVolume = ValueNotifier<double>(1.0);
+  final ValueNotifier<double> musicVolume = ValueNotifier<double>(0.2);
+  final ValueNotifier<double> sfxVolume = ValueNotifier<double>(1.0);
+  final ValueNotifier<bool> bgMusicEnabled = ValueNotifier<bool>(true);
+  final ValueNotifier<String?> bgMusicPath = ValueNotifier<String?>(null);
+
+  void load(Map<String, dynamic> json) {
+    masterVolume.value = (json['masterVolume'] as num?)?.toDouble() ?? masterVolume.value;
+    musicVolume.value = (json['musicVolume'] as num?)?.toDouble() ?? musicVolume.value;
+    sfxVolume.value = (json['sfxVolume'] as num?)?.toDouble() ?? sfxVolume.value;
+    bgMusicEnabled.value = json['bgMusicEnabled'] as bool? ?? bgMusicEnabled.value;
+    bgMusicPath.value = json['bgMusicPath'] as String? ?? bgMusicPath.value;
+  }
+
+  Map<String, dynamic> toJson() => {
+    'masterVolume': masterVolume.value,
+    'musicVolume': musicVolume.value,
+    'sfxVolume': sfxVolume.value,
+    'bgMusicEnabled': bgMusicEnabled.value,
+    'bgMusicPath': bgMusicPath.value,
+  };
+
+  void resetToDefaults() {
+    masterVolume.value = 1.0;
+    musicVolume.value = 0.2;
+    sfxVolume.value = 1.0;
+    bgMusicEnabled.value = true;
+    bgMusicPath.value = null;
+  }
+}

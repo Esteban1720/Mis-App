@@ -1,0 +1,10 @@
+// Default values for settings
+const double kDefaultMasterVolume = 1.0;
+const double kDefaultMusicVolume = 0.2;
+const double kDefaultSfxVolume = 1.0;
+const bool kDefaultBgMusicEnabled = true;
+const bool kDefaultIsFullscreen = false;
+const double kDefaultControllerSensitivity = 0.5;
+const bool kDefaultInvertYAxis = false;
+const double kDefaultWindowWidth = 1280.0;
+const double kDefaultWindowHeight = 800.0;

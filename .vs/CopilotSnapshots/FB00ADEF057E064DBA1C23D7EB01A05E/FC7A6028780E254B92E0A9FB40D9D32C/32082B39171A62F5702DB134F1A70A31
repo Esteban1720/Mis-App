@@ -1,0 +1,424 @@
+﻿// lib/services/input_service.dart
+// InputService with hold/repeat behavior and enhanced debug logging
+
+import 'dart:async';
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:window_manager/window_manager.dart';
+
+// Windows-only gamepad package
+import 'package:win32_gamepad/win32_gamepad.dart' show Gamepad, GamepadState;
+
+typedef VoidCb = void Function();
+
+/// Listener simple que puedes push/pop en la pila para controlar quien recibe
+/// los eventos de input. El listener top de la pila recibe la prioridad.
+class InputListener {
+  VoidCb? onLeft;
+  VoidCb? onRight;
+  VoidCb? onUp;
+  VoidCb? onDown;
+  VoidCb? onActivate;
+  VoidCb? onBack;
+  VoidCb? onToggleFullscreen;
+  VoidCb? onSelect;
+  VoidCb? onShare;
+  VoidCb? onSettings;
+
+  InputListener({
+    this.onLeft,
+    this.onRight,
+    this.onUp,
+    this.onDown,
+    this.onActivate,
+    this.onBack,
+    this.onToggleFullscreen,
+    this.onSelect,
+    this.onShare,
+    this.onSettings,
+  });
+}
+
+class InputService {
+  InputService._internal();
+  static final InputService _instance = InputService._internal();
+  static InputService get instance => _instance;
+
+  bool _initialized = false;
+
+  // Legacy global callbacks (compatibilidad). Idealmente migrar a stack.
+  VoidCb? onLeft;
+  VoidCb? onRight;
+  VoidCb? onUp;
+  VoidCb? onDown;
+  VoidCb? onActivate;
+  VoidCb? onBack;
+  VoidCb? onToggleFullscreen;
+  VoidCb? onSelect;
+  VoidCb? onShare;
+  VoidCb? onSettings;
+
+  // Stack de listeners — el último añadido (top) maneja primero.
+  final List<InputListener> _listeners = [];
+
+  // Debounce por acción+padIndex
+  final Map<String, int> _lastFired = {};
+  final int _debounceMs = 120;
+
+  // Windows polling
+  Timer? _pollTimer;
+  final List<Gamepad> _pads = [];
+  final List<GamepadState?> _prevStates = [];
+
+  // Hold repeat timers per pad+action
+  final Map<String, Timer?> _repeatTimers = {};
+
+  StreamSubscription<dynamic>? _subscription;
+
+  // Configurable timings
+  int _initialRepeatDelay = 300; // ms before repeating
+  int _repeatInterval = 80; // ms repeat interval
+
+  // Debugging
+  bool _enableDebug = true;
+  void _d(String msg) {
+    if (_enableDebug) debugPrint('InputService: $msg');
+  }
+
+  Future<void> initialize(
+      {bool enableDebug = true,
+      int? initialDelayMs,
+      int? repeatIntervalMs}) async {
+    if (_initialized) return;
+    _enableDebug = enableDebug;
+    if (initialDelayMs != null) _initialRepeatDelay = initialDelayMs;
+    if (repeatIntervalMs != null) _repeatInterval = repeatIntervalMs;
+
+    _d('initialize (platform: ${Platform.operatingSystem})');
+
+    if (Platform.isWindows) {
+      _startWindowsPolling();
+    } else {
+      _initGeneric();
+    }
+
+    _initialized = true;
+  }
+
+  Future<void> suspend() async {
+    if (!_initialized) return;
+    _d('suspend() called');
+
+    if (Platform.isWindows) {
+      _stopWindowsPolling();
+      _d('windows polling stopped');
+    } else {
+      try {
+        _subscription?.pause();
+        _d('generic subscription paused');
+      } catch (e) {
+        _d('error pausing subscription: $e');
+      }
+    }
+  }
+
+  Future<void> resume() async {
+    if (!_initialized) return;
+    _d('resume() called');
+
+    if (Platform.isWindows) {
+      _startWindowsPolling();
+      _d('windows polling started/resumed');
+    } else {
+      try {
+        _subscription?.resume();
+        _d('generic subscription resumed');
+      } catch (e) {
+        _d('error resuming subscription: $e');
+      }
+    }
+  }
+
+  void dispose() {
+    if (!_initialized) return;
+    _d('dispose()');
+    if (Platform.isWindows) {
+      _stopWindowsPolling();
+    } else {
+      _subscription?.cancel();
+      _subscription = null;
+    }
+    _initialized = false;
+  }
+
+  void _initGeneric() {
+    _d('generic gamepad support disabled in this build.');
+  }
+
+  // -----------------------
+  // Listener stack API
+  // -----------------------
+  /// Push a listener on top. Returns a remover function to pop that listener.
+  VoidCb pushListener(InputListener listener) {
+    _listeners.add(listener);
+    _d('pushListener (stack-size=${_listeners.length})');
+    return () {
+      try {
+        _listeners.remove(listener);
+        _d('removed listener (stack-size=${_listeners.length})');
+      } catch (_) {}
+    };
+  }
+
+  InputListener? get _topListener =>
+      _listeners.isNotEmpty ? _listeners.last : null;
+
+  /// Dispatch helper: intenta llamar al callback del listener top; si no existe,
+  /// usa el fallback legacy global.
+  void _dispatch(VoidCb? Function(InputListener l) selector, VoidCb? fallback) {
+    final top = _topListener;
+    try {
+      if (top != null) {
+        final cb = selector(top);
+        if (cb != null) {
+          cb();
+          return;
+        }
+      }
+      if (fallback != null) {
+        fallback();
+      }
+    } catch (e, st) {
+      _d('dispatch error: $e\n$st');
+    }
+  }
+
+  // -----------------------
+  // Hold/repeat helpers
+  // -----------------------
+  String _repeatKey(String action, int padIndex) => '$action:$padIndex';
+
+  void _startRepeat(String key, VoidCb trigger) {
+    _d('startRepeat $key');
+    // cancel existing if any
+    try {
+      _repeatTimers[key]?.cancel();
+    } catch (_) {}
+
+    // initial delayed timer, then periodic
+    Timer? initialTimer;
+    initialTimer = Timer(Duration(milliseconds: _initialRepeatDelay), () {
+      // fire immediately once when entering repeat loop
+      try {
+        trigger();
+      } catch (e) {
+        _d('trigger error in initialTimer: $e');
+      }
+      // periodic
+      try {
+        _repeatTimers[key] =
+            Timer.periodic(Duration(milliseconds: _repeatInterval), (_) {
+          try {
+            trigger();
+          } catch (e) {
+            _d('trigger error in periodic: $e');
+          }
+        });
+      } catch (e) {
+        _d('error scheduling periodic for $key: $e');
+      }
+    });
+
+    _repeatTimers[key] = initialTimer;
+  }
+
+  void _stopRepeat(String key) {
+    _d('stopRepeat $key');
+    try {
+      _repeatTimers[key]?.cancel();
+    } catch (e) {
+      _d('error cancelling repeat timer $key: $e');
+    }
+    _repeatTimers.remove(key);
+  }
+
+  int _now() => DateTime.now().millisecondsSinceEpoch;
+
+  bool _shouldFire(String key) {
+    final now = _now();
+    final last = _lastFired[key] ?? 0;
+    if (now - last < _debounceMs) return false;
+    _lastFired[key] = now;
+    return true;
+  }
+
+  // -----------------------
+  // Windows polling with hold/repeat
+  // -----------------------
+  void _startWindowsPolling() {
+    if (_pollTimer != null) {
+      _d('polling already running (ignoring start)');
+      return;
+    }
+
+    _d('starting windows polling...');
+
+    _pads.clear();
+    _prevStates.clear();
+
+    for (var i = 0; i < 4; i++) {
+      try {
+        final pad = Gamepad(i);
+        _pads.add(pad);
+        _prevStates.add(pad.state);
+        _d('detected gamepad at index $i');
+      } catch (e) {
+        _d('no gamepad at index $i or error: $e');
+      }
+    }
+
+    if (_pads.isEmpty) {
+      _d('no gamepads detected; polling not started.');
+      return;
+    }
+
+    _d('starting poll timer; pads=${_pads.length}');
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 60), (_) {
+      try {
+        for (var i = 0; i < _pads.length; i++) {
+          final pad = _pads[i];
+          pad.updateState();
+          final state = pad.state;
+          final prev = _prevStates[i]!;
+
+          // D-Pad edges
+          if (state.dpadUp && !prev.dpadUp) {
+            final key = _repeatKey('up', i);
+            if (_shouldFire('up:$i')) _dispatch((l) => l.onUp, onUp);
+            _startRepeat(key, () => _dispatch((l) => l.onUp, onUp));
+          } else if (!state.dpadUp && prev.dpadUp) {
+            _stopRepeat(_repeatKey('up', i));
+          }
+
+          if (state.dpadDown && !prev.dpadDown) {
+            final key = _repeatKey('down', i);
+            if (_shouldFire('down:$i')) _dispatch((l) => l.onDown, onDown);
+            _startRepeat(key, () => _dispatch((l) => l.onDown, onDown));
+          } else if (!state.dpadDown && prev.dpadDown) {
+            _stopRepeat(_repeatKey('down', i));
+          }
+
+          if (state.dpadLeft && !prev.dpadLeft) {
+            final key = _repeatKey('left', i);
+            if (_shouldFire('left:$i')) _dispatch((l) => l.onLeft, onLeft);
+            _startRepeat(key, () => _dispatch((l) => l.onLeft, onLeft));
+          } else if (!state.dpadLeft && prev.dpadLeft) {
+            _stopRepeat(_repeatKey('left', i));
+          }
+
+          if (state.dpadRight && !prev.dpadRight) {
+            final key = _repeatKey('right', i);
+            if (_shouldFire('right:$i')) _dispatch((l) => l.onRight, onRight);
+            _startRepeat(key, () => _dispatch((l) => l.onRight, onRight));
+          } else if (!state.dpadRight && prev.dpadRight) {
+            _stopRepeat(_repeatKey('right', i));
+          }
+
+          // Buttons (edge triggered)
+          if (state.buttonA && !prev.buttonA) {
+            if (_shouldFire('activate:$i'))
+              _dispatch((l) => l.onActivate, onActivate);
+          }
+          if (state.buttonB && !prev.buttonB) {
+            if (_shouldFire('back:$i')) _dispatch((l) => l.onBack, onBack);
+          }
+          if (state.buttonStart && !prev.buttonStart) {
+            if (_shouldFire('toggle_fs:$i'))
+              _dispatch((l) => l.onToggleFullscreen, onToggleFullscreen);
+          }
+
+          if (state.buttonBack && !prev.buttonBack) {
+            if (_shouldFire('select:$i'))
+              _dispatch((l) => l.onSelect, onSelect);
+          }
+          if (state.buttonX && !prev.buttonX) {
+            if (_shouldFire('share:$i')) _dispatch((l) => l.onShare, onShare);
+          }
+          if (state.buttonY && !prev.buttonY) {
+            if (_shouldFire('settings:$i'))
+              _dispatch((l) => l.onSettings, onSettings);
+          }
+
+          // Thumbstick deadzone with hold/repeat: detect direction edges and start repeats
+          const dead = 12000;
+          // left/right
+          if (state.leftThumbstickX <= -dead && prev.leftThumbstickX > -dead) {
+            final key = _repeatKey('left', i);
+            if (_shouldFire('left:$i')) _dispatch((l) => l.onLeft, onLeft);
+            _startRepeat(key, () => _dispatch((l) => l.onLeft, onLeft));
+          } else if (state.leftThumbstickX > -dead &&
+              prev.leftThumbstickX <= -dead) {
+            _stopRepeat(_repeatKey('left', i));
+          } else if (state.leftThumbstickX >= dead &&
+              prev.leftThumbstickX < dead) {
+            final key = _repeatKey('right', i);
+            if (_shouldFire('right:$i')) _dispatch((l) => l.onRight, onRight);
+            _startRepeat(key, () => _dispatch((l) => l.onRight, onRight));
+          } else if (state.leftThumbstickX < dead &&
+              prev.leftThumbstickX >= dead) {
+            _stopRepeat(_repeatKey('right', i));
+          }
+
+          // up/down
+          if (state.leftThumbstickY >= dead && prev.leftThumbstickY < dead) {
+            final key = _repeatKey('up', i);
+            if (_shouldFire('up:$i')) _dispatch((l) => l.onUp, onUp);
+            _startRepeat(key, () => _dispatch((l) => l.onUp, onUp));
+          } else if (state.leftThumbstickY < dead &&
+              prev.leftThumbstickY >= dead) {
+            _stopRepeat(_repeatKey('up', i));
+          } else if (state.leftThumbstickY <= -dead &&
+              prev.leftThumbstickY > -dead) {
+            final key = _repeatKey('down', i);
+            if (_shouldFire('down:$i')) _dispatch((l) => l.onDown, onDown);
+            _startRepeat(key, () => _dispatch((l) => l.onDown, onDown));
+          } else if (state.leftThumbstickY > -dead &&
+              prev.leftThumbstickY <= -dead) {
+            _stopRepeat(_repeatKey('down', i));
+          }
+
+          _prevStates[i] = state;
+        }
+      } catch (e, st) {
+        _d('polling error: $e\n$st');
+      }
+    });
+
+    _d('windows polling started with ${_pads.length} pad(s).');
+  }
+
+  void _stopWindowsPolling() {
+    _d('stopping windows polling...');
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    for (final key in _repeatTimers.keys.toList()) {
+      try {
+        _repeatTimers[key]?.cancel();
+      } catch (_) {}
+    }
+    _repeatTimers.clear();
+    _pads.clear();
+    _prevStates.clear();
+    _d('windows polling stopped.');
+  }
+
+  Future<void> toggleFullscreen() async {
+    try {
+      final isFull = await windowManager.isFullScreen();
+      await windowManager.setFullScreen(!isFull);
+      await windowManager.focus();
+    } catch (e) {
+      _d('toggleFullscreen error: $e');
+    }
+  }
+}

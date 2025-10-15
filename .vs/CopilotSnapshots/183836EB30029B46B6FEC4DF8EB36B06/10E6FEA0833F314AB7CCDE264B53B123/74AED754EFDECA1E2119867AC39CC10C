@@ -1,0 +1,133 @@
+﻿import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import '../services/profile_service.dart';
+import '../models/profile.dart';
+
+class ProfileHomeScreen extends StatefulWidget {
+  const ProfileHomeScreen({Key? key, required this.profile}) : super(key: key);
+  final Profile profile;
+
+  @override
+  State<ProfileHomeScreen> createState() => _ProfileHomeScreenState();
+}
+
+class _ProfileHomeScreenState extends State<ProfileHomeScreen> {
+  late TextEditingController _nameController;
+  late TextEditingController _pinController;
+  String? _avatarPath;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController = TextEditingController(text: widget.profile.name);
+    _pinController = TextEditingController();
+    _avatarPath = widget.profile.avatarPath;
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _pinController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickAvatar() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      allowMultiple: false,
+    );
+    if (result == null) return;
+    final path = result.files.first.path;
+    if (path == null) return;
+    setState(() => _avatarPath = path);
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    final p = widget.profile;
+    p.name = _nameController.text.trim();
+    p.avatarPath = _avatarPath;
+    final pin = _pinController.text.trim();
+    if (pin.isNotEmpty) {
+      p.pinHash = ProfileService.instance.hashPin(pin);
+      p.isPrivate = true;
+    }
+
+    // Load, update and save profiles list
+    final profiles = await ProfileService.instance.loadProfiles();
+    final idx = profiles.indexWhere((x) => x.id == p.id);
+    if (idx >= 0) {
+      profiles[idx] = p;
+    } else {
+      profiles.add(p);
+    }
+    await ProfileService.instance.saveProfiles(profiles);
+
+    // Also update runtime currentProfile if matches
+    if (ProfileService.instance.currentProfile?.id == p.id) {
+      ProfileService.instance.setCurrentProfile(p);
+    }
+
+    setState(() => _saving = false);
+    if (mounted) Navigator.of(context).pop(true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Editar perfil')),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(children: [
+          const SizedBox(height: 8),
+          GestureDetector(
+            onTap: _pickAvatar,
+            child: CircleAvatar(
+              radius: 48,
+              backgroundImage:
+                  _avatarPath != null ? FileImage(File(_avatarPath!)) : null,
+              child: _avatarPath == null
+                  ? const Icon(Icons.person, size: 48)
+                  : null,
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextButton.icon(
+            icon: const Icon(Icons.photo),
+            label: const Text('Cambiar avatar'),
+            onPressed: _pickAvatar,
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _nameController,
+            decoration: const InputDecoration(labelText: 'Nombre'),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _pinController,
+            decoration: const InputDecoration(
+                labelText: 'PIN (dejar en blanco para no cambiar)'),
+            obscureText: true,
+            keyboardType: TextInputType.number,
+            maxLength: 8,
+          ),
+          const SizedBox(height: 20),
+          ElevatedButton.icon(
+            icon: _saving
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.save),
+            label: const Text('Guardar'),
+            onPressed: _saving ? null : _save,
+          ),
+        ]),
+      ),
+    );
+  }
+}
+// End of profile_home.dart
