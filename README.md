@@ -1,4 +1,4 @@
-# playstations
+# EmuChull
 
 A new Flutter project.
 
