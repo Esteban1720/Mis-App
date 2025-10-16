@@ -1,6 +1,6 @@
-﻿# EmuChull (Playstations)
+﻿# EmuChull
 
-EmuChull es una aplicación de escritorio escrita en Flutter que funciona como lanzador/emulador de consolas (interfaz tipo "Playstations").
+EmuChull es una aplicación de escritorio escrita en Flutter que funciona como lanzador/emulador de consolas (interfaz tipo consola).
 Ofrece opciones de configuración, gestión de emuladores, controles, audio y un instalador de Windows para distribuir la aplicación.
 
 Este README cubre qué hace la aplicación, cómo preparar un entorno de desarrollo, pasos para compilar en Windows, cómo generar el instalador y notas técnicas útiles para mantenimiento.
