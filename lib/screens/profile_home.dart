@@ -13,7 +13,6 @@ import 'package:emuchull/widgets/onscreen_keyboard.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
-
 class ProfileHomeScreen extends StatefulWidget {
   const ProfileHomeScreen({super.key, required this.profile});
   final Profile profile;
@@ -162,7 +161,14 @@ class _ProfileHomeScreenState extends State<ProfileHomeScreen> {
   }
 
   Widget _buildAvatar() {
-    final avatar = _avatarPath != null ? FileImage(File(_avatarPath!)) : null;
+    ImageProvider? avatar;
+    if (_avatarPath != null) {
+      if (_avatarPath!.startsWith('asset:')) {
+        avatar = AssetImage(_avatarPath!.substring(6));
+      } else {
+        avatar = FileImage(File(_avatarPath!));
+      }
+    }
     return FocusableActionDetector(
       autofocus: _selectedIndex == 0,
       onShowFocusHighlight: (hasFocus) {

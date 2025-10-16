@@ -1,6 +1,7 @@
 // lib/screens/emuchull_login.dart
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
     show rootBundle, RawKeyEvent, RawKeyDownEvent, LogicalKeyboardKey;
@@ -238,7 +239,7 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
   }
 
   Future<void> _showAddProfile() async {
-    // Rebuilt, robust version using a dynamic focusable list and deterministic actions.
+    // Implementation: show grid of packaged avatars under PIN and an Import button in actions
     String? avatarPath;
     String? pin;
     bool isPrivate = false;
@@ -319,22 +320,18 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
       }
     }
 
-    Future<void> selectAvatar() async {
-      final id = DateTime.now().millisecondsSinceEpoch.toString();
-      final path = await _pickAvatarAndSave(id);
-      if (!dialogOpen) return;
-      if (path != null) {
-        avatarPath = path;
-        if (dialogSetSt != null) dialogSetSt!(() {});
-      }
-    }
-
     Future<void> performCreate() async {
       final name = nameCtl.text.trim();
       if (name.isEmpty) {
         if (!dialogOpen || !mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('El nombre no puede estar vacío')));
+        return;
+      }
+      if (avatarPath == null || avatarPath!.isEmpty) {
+        if (!dialogOpen || !mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Debes seleccionar o importar un avatar')));
         return;
       }
       if (isPrivate) {
@@ -366,7 +363,27 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
       if (mounted) Navigator.of(context).pop();
     }
 
-    // Build a dynamic list of focusable actions so indices are deterministic
+    // Preload asset avatars
+    List<String> avatarKeys = [];
+    try {
+      final manifest =
+          await DefaultAssetBundle.of(context).loadString('AssetManifest.json');
+      final Map<String, dynamic> map = manifest.isNotEmpty
+          ? Map<String, dynamic>.from(jsonDecode(manifest))
+          : {};
+      avatarKeys =
+          map.keys.where((k) => k.startsWith('assets/avatars/')).toList();
+    } catch (_) {
+      avatarKeys = [];
+    }
+
+    // Grid state
+    bool avatarGridFocused = false;
+    int avatarSelectedIdx = 0;
+    // If true, the currently chosen avatar was imported (file) and should block grid entry
+    bool avatarImported = false;
+
+    // Focus nodes and nav
     List<FocusNode> focusNodes = [];
     VoidCb? removeListener;
     int selected = 0;
@@ -376,16 +393,15 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
       labels.add('Nombre');
       labels.add('Privado');
       if (isPrivate) labels.add('PIN');
-      labels.add('Avatar');
+      labels.add('Avatares');
+      labels.add('Importar avatar');
       labels.add('Cancelar');
       labels.add('Crear');
       return labels;
     }
 
     void ensureFocusNodes(int count) {
-      while (focusNodes.length < count) {
-        focusNodes.add(FocusNode());
-      }
+      while (focusNodes.length < count) focusNodes.add(FocusNode());
       while (focusNodes.length > count) {
         final fn = focusNodes.removeLast();
         try {
@@ -403,6 +419,9 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
       try {
         focusNodes[selected].requestFocus();
       } catch (_) {}
+      // Only allow avatar grid focus if the current avatar is NOT an imported file
+      avatarGridFocused =
+          (selected == labels.indexOf('Avatares')) && !avatarImported;
     }
 
     void move(int delta) {
@@ -411,18 +430,83 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
       int next = (selected + delta) % len;
       if (next < 0) next += len;
       selected = next;
-      if (dialogSetSt != null && dialogOpen) {
-        dialogSetSt!(() {});
-      }
+      if (dialogSetSt != null && dialogOpen) dialogSetSt!(() {});
       reapplyFocus();
     }
 
     removeListener = InputService.instance.pushListener(
       InputListener(
-        onLeft: () => move(-1),
-        onRight: () => move(1),
-        onUp: () => move(-1),
-        onDown: () => move(1),
+        onLeft: () {
+          if (avatarGridFocused) {
+            if (avatarSelectedIdx % 6 == 0) {
+              // leave grid to previous label
+              avatarGridFocused = false;
+              final idx = buildLabels().indexOf('Avatares');
+              selected = (idx - 1).clamp(0, buildLabels().length - 1);
+              if (dialogSetSt != null && dialogOpen) dialogSetSt!(() {});
+              reapplyFocus();
+            } else {
+              avatarSelectedIdx =
+                  (avatarSelectedIdx - 1).clamp(0, avatarKeys.length - 1);
+              if (dialogSetSt != null && dialogOpen) dialogSetSt!(() {});
+            }
+          } else {
+            move(-1);
+          }
+        },
+        onRight: () {
+          if (avatarGridFocused) {
+            final atRight = (avatarSelectedIdx % 6) == 5;
+            final atLast = avatarSelectedIdx == avatarKeys.length - 1;
+            if (atRight || atLast) {
+              avatarGridFocused = false;
+              final idx = buildLabels().indexOf('Avatares');
+              selected = (idx + 1).clamp(0, buildLabels().length - 1);
+              if (dialogSetSt != null && dialogOpen) dialogSetSt!(() {});
+              reapplyFocus();
+            } else {
+              avatarSelectedIdx =
+                  (avatarSelectedIdx + 1).clamp(0, avatarKeys.length - 1);
+              if (dialogSetSt != null && dialogOpen) dialogSetSt!(() {});
+            }
+          } else {
+            move(1);
+          }
+        },
+        onUp: () {
+          if (avatarGridFocused) {
+            final next = avatarSelectedIdx - 6;
+            if (next < 0) {
+              avatarGridFocused = false;
+              final idx = buildLabels().indexOf('Avatares');
+              selected = (idx - 1).clamp(0, buildLabels().length - 1);
+              if (dialogSetSt != null && dialogOpen) dialogSetSt!(() {});
+              reapplyFocus();
+            } else {
+              avatarSelectedIdx = next.clamp(0, avatarKeys.length - 1);
+              if (dialogSetSt != null && dialogOpen) dialogSetSt!(() {});
+            }
+          } else {
+            move(-1);
+          }
+        },
+        onDown: () {
+          if (avatarGridFocused) {
+            final next = avatarSelectedIdx + 6;
+            if (next >= avatarKeys.length) {
+              avatarGridFocused = false;
+              final idx = buildLabels().indexOf('Avatares');
+              selected = (idx + 1).clamp(0, buildLabels().length - 1);
+              if (dialogSetSt != null && dialogOpen) dialogSetSt!(() {});
+              reapplyFocus();
+            } else {
+              avatarSelectedIdx = next.clamp(0, avatarKeys.length - 1);
+              if (dialogSetSt != null && dialogOpen) dialogSetSt!(() {});
+            }
+          } else {
+            move(1);
+          }
+        },
         onActivate: () async {
           if (!dialogOpen) return;
           final labels = buildLabels();
@@ -432,24 +516,58 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
               await openNameKeyboard();
               break;
             case 'Privado':
-              // toggle private and rebuild labels/focus nodes
               if (dialogSetSt != null) {
-                dialogSetSt!(() {
-                  isPrivate = !isPrivate;
-                });
+                dialogSetSt!(() => isPrivate = !isPrivate);
               } else {
                 isPrivate = !isPrivate;
               }
-              if (selected >= buildLabels().length) {
+              if (selected >= buildLabels().length)
                 selected = buildLabels().length - 1;
-              }
               reapplyFocus();
               break;
             case 'PIN':
               await openPinKeyboard();
               break;
-            case 'Avatar':
-              await selectAvatar();
+            case 'Avatares':
+              // If the user already imported or selected an avatar, do not allow
+              // entering the grid — move focus to 'Crear' instead.
+              if (avatarPath != null && avatarPath!.isNotEmpty) {
+                final createIdx = buildLabels().indexOf('Crear');
+                if (createIdx >= 0) selected = createIdx;
+                if (dialogSetSt != null) dialogSetSt!(() {});
+                reapplyFocus();
+              } else if (avatarGridFocused) {
+                if (avatarSelectedIdx >= 0 &&
+                    avatarSelectedIdx < avatarKeys.length) {
+                  avatarPath = 'asset:${avatarKeys[avatarSelectedIdx]}';
+                  avatarImported = false; // selected from assets, not imported
+                  // after selecting from grid, move focus to Create
+                  avatarGridFocused = false;
+                  final createIdx = buildLabels().indexOf('Crear');
+                  if (createIdx >= 0) selected = createIdx;
+                  if (dialogSetSt != null) dialogSetSt!(() {});
+                  reapplyFocus();
+                }
+              } else {
+                avatarGridFocused = true;
+                avatarSelectedIdx = avatarKeys.isNotEmpty ? 0 : -1;
+                if (dialogSetSt != null) dialogSetSt!(() {});
+              }
+              break;
+            case 'Importar avatar':
+              final id = DateTime.now().millisecondsSinceEpoch.toString();
+              final saved = await _pickAvatarAndSave(id);
+              if (!dialogOpen) return;
+              if (saved != null) {
+                avatarPath = saved;
+                avatarImported = true; // mark as imported so grid is blocked
+                // after importing, don't allow entering the grid; move focus to Create
+                avatarGridFocused = false;
+                final createIdx = buildLabels().indexOf('Crear');
+                if (createIdx >= 0) selected = createIdx;
+                if (dialogSetSt != null) dialogSetSt!(() {});
+                reapplyFocus();
+              }
               break;
             case 'Cancelar':
               try {
@@ -465,6 +583,11 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
         },
         onBack: () {
           try {
+            if (avatarGridFocused) {
+              avatarGridFocused = false;
+              if (dialogSetSt != null) dialogSetSt!(() {});
+              return;
+            }
             Navigator.of(context).maybePop();
           } catch (_) {}
         },
@@ -484,7 +607,6 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
 
             final labels = buildLabels();
             ensureFocusNodes(labels.length);
-            // ensure selected is within range
             if (selected >= labels.length) selected = labels.length - 1;
             WidgetsBinding.instance.addPostFrameCallback((_) {
               reapplyFocus();
@@ -503,7 +625,7 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
             return AlertDialog(
               backgroundColor: const Color(0xFF121316),
               content: SizedBox(
-                width: 480,
+                width: 520,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -543,6 +665,7 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
                       ),
                     ),
                     const SizedBox(height: 12),
+
                     // Privado
                     FocusableActionDetector(
                       focusNode: focusNodes[1],
@@ -554,9 +677,8 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
                         onTap: () {
                           selected = 1;
                           reapplyFocus();
-                          if (dialogSetSt != null) {
+                          if (dialogSetSt != null)
                             dialogSetSt!(() => isPrivate = !isPrivate);
-                          }
                         },
                         child: Container(
                           padding: const EdgeInsets.symmetric(
@@ -571,9 +693,8 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
                                   value: isPrivate,
                                   onChanged: (v) {
                                     if (!dialogOpen) return;
-                                    if (dialogSetSt != null) {
+                                    if (dialogSetSt != null)
                                       dialogSetSt!(() => isPrivate = v);
-                                    }
                                     reapplyFocus();
                                   })
                             ],
@@ -582,6 +703,7 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
                       ),
                     ),
                     const SizedBox(height: 8),
+
                     if (isPrivate)
                       FocusableActionDetector(
                         focusNode: focusNodes[2],
@@ -602,13 +724,12 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
                             child: Row(
                               children: [
                                 Expanded(
-                                  child: Text(
-                                    pin != null && pin!.isNotEmpty
-                                        ? 'PIN: ****'
-                                        : 'PIN (4 dígitos)',
-                                    style: const TextStyle(color: Colors.white),
-                                  ),
-                                ),
+                                    child: Text(
+                                        pin != null && pin!.isNotEmpty
+                                            ? 'PIN: ****'
+                                            : 'PIN (4 dígitos)',
+                                        style: const TextStyle(
+                                            color: Colors.white))),
                                 const SizedBox(width: 8),
                                 const Icon(Icons.lock, color: Colors.white70),
                               ],
@@ -616,92 +737,190 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
                           ),
                         ),
                       ),
+
                     const SizedBox(height: 10),
-                    // Avatar
-                    FocusableActionDetector(
-                      focusNode: focusNodes[isPrivate ? 3 : 2],
-                      autofocus: selected == (isPrivate ? 3 : 2),
-                      onShowFocusHighlight: (hasFocus) {
-                        if (hasFocus && dialogOpen) dialogSetSt?.call(() {});
-                      },
-                      child: GestureDetector(
-                        onTap: () async {
-                          selected = isPrivate ? 3 : 2;
-                          reapplyFocus();
-                          await selectAvatar();
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 10),
-                          decoration: itemDecoration(isPrivate ? 3 : 2),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  avatarPath != null
-                                      ? 'Avatar seleccionado'
-                                      : 'Seleccionar avatar',
-                                  style: const TextStyle(color: Colors.white),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              const Icon(Icons.photo, color: Colors.white70),
-                            ],
+
+                    // Avatares grid
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 10),
+                      decoration:
+                          itemDecoration(buildLabels().indexOf('Avatares')),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 6),
+                            child: Text(
+                                avatarPath != null
+                                    ? 'Avatar seleccionado'
+                                    : 'Avatares disponibles',
+                                style: const TextStyle(color: Colors.white)),
                           ),
-                        ),
+                          Container(
+                            height: 200,
+                            decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(6),
+                                color: const Color(0xFF0F1113)),
+                            child: avatarKeys.isEmpty
+                                ? const Center(
+                                    child: Text('No hay avatares empaquetados',
+                                        style:
+                                            TextStyle(color: Colors.white70)))
+                                : GridView.builder(
+                                    padding: const EdgeInsets.all(12),
+                                    gridDelegate:
+                                        const SliverGridDelegateWithFixedCrossAxisCount(
+                                            crossAxisCount: 5,
+                                            crossAxisSpacing: 12,
+                                            mainAxisSpacing: 12,
+                                            childAspectRatio: 1.0),
+                                    itemCount: avatarKeys.length,
+                                    itemBuilder: (c, i) {
+                                      final asset = avatarKeys[i];
+                                      final highlighted = avatarGridFocused &&
+                                          i == avatarSelectedIdx;
+                                      // Each grid cell is square (childAspectRatio 1.0).
+                                      // Render a circular avatar using ClipOval and show a circular border when highlighted.
+                                      return GestureDetector(
+                                        onTap: () {
+                                          avatarPath = 'asset:$asset';
+                                          avatarImported =
+                                              false; // selected from assets
+                                          if (dialogSetSt != null)
+                                            dialogSetSt!(() {});
+                                        },
+                                        child: Container(
+                                          padding: const EdgeInsets.all(4),
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            border: highlighted
+                                                ? Border.all(
+                                                    color: Colors.white24,
+                                                    width: 2)
+                                                : null,
+                                          ),
+                                          child: ClipOval(
+                                            child: SizedBox.expand(
+                                              child: Image.asset(asset,
+                                                  fit: BoxFit.cover),
+                                            ),
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
                 ),
               ),
               actions: [
-                // Cancel
-                FocusableActionDetector(
-                  focusNode: focusNodes[isPrivate ? 4 : 3],
-                  autofocus: selected == (isPrivate ? 4 : 3),
-                  onShowFocusHighlight: (hasFocus) {
-                    if (hasFocus && dialogOpen) dialogSetSt?.call(() {});
-                  },
-                  child: GestureDetector(
-                    onTap: () => Navigator.of(ctx).pop(),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      decoration: (selected == (isPrivate ? 4 : 3))
-                          ? BoxDecoration(
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(color: Colors.white24))
-                          : null,
-                      child: TextButton(
-                          onPressed: () => Navigator.of(ctx).pop(),
-                          child: const Text('Cancelar')),
+                // Importar avatar (izquierda) + Cancelar/Crear a la derecha
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    FocusableActionDetector(
+                      focusNode:
+                          focusNodes[buildLabels().indexOf('Importar avatar')],
+                      autofocus:
+                          selected == buildLabels().indexOf('Importar avatar'),
+                      onShowFocusHighlight: (hasFocus) {
+                        if (hasFocus && dialogOpen) dialogSetSt?.call(() {});
+                      },
+                      child: GestureDetector(
+                        onTap: () async {
+                          selected = buildLabels().indexOf('Importar avatar');
+                          reapplyFocus();
+                          final id =
+                              DateTime.now().millisecondsSinceEpoch.toString();
+                          final saved = await _pickAvatarAndSave(id);
+                          if (saved != null) {
+                            avatarPath = saved;
+                            if (dialogSetSt != null) dialogSetSt!(() {});
+                          }
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          decoration: (selected ==
+                                  buildLabels().indexOf('Importar avatar'))
+                              ? BoxDecoration(
+                                  borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(color: Colors.white24),
+                                )
+                              : null,
+                          child: TextButton(
+                            onPressed: () async {
+                              final id = DateTime.now()
+                                  .millisecondsSinceEpoch
+                                  .toString();
+                              final saved = await _pickAvatarAndSave(id);
+                              if (saved != null) {
+                                avatarPath = saved;
+                                if (dialogSetSt != null) dialogSetSt!(() {});
+                              }
+                            },
+                            child: const Text('Importar avatar'),
+                          ),
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-                // Create
-                FocusableActionDetector(
-                  focusNode: focusNodes[isPrivate ? 5 : 4],
-                  autofocus: selected == (isPrivate ? 5 : 4),
-                  onShowFocusHighlight: (hasFocus) {
-                    if (hasFocus && dialogOpen) dialogSetSt?.call(() {});
-                  },
-                  child: GestureDetector(
-                    onTap: () async {
-                      selected = isPrivate ? 5 : 4;
-                      reapplyFocus();
-                      await performCreate();
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      decoration: (selected == (isPrivate ? 5 : 4))
-                          ? BoxDecoration(
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(color: Colors.white24))
-                          : null,
-                      child: ElevatedButton(
-                          onPressed: performCreate,
-                          child: const Text('Crear perfil')),
-                    ),
-                  ),
+                    Row(children: [
+                      FocusableActionDetector(
+                        focusNode:
+                            focusNodes[buildLabels().indexOf('Cancelar')],
+                        autofocus:
+                            selected == buildLabels().indexOf('Cancelar'),
+                        onShowFocusHighlight: (hasFocus) {
+                          if (hasFocus && dialogOpen) dialogSetSt?.call(() {});
+                        },
+                        child: GestureDetector(
+                            onTap: () => Navigator.of(ctx).pop(),
+                            child: Container(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 8),
+                                decoration: (selected ==
+                                        buildLabels().indexOf('Cancelar'))
+                                    ? BoxDecoration(
+                                        borderRadius: BorderRadius.circular(6),
+                                        border:
+                                            Border.all(color: Colors.white24))
+                                    : null,
+                                child: TextButton(
+                                    onPressed: () => Navigator.of(ctx).pop(),
+                                    child: const Text('Cancelar')))),
+                      ),
+                      const SizedBox(width: 8),
+                      FocusableActionDetector(
+                        focusNode: focusNodes[buildLabels().indexOf('Crear')],
+                        autofocus: selected == buildLabels().indexOf('Crear'),
+                        onShowFocusHighlight: (hasFocus) {
+                          if (hasFocus && dialogOpen) dialogSetSt?.call(() {});
+                        },
+                        child: GestureDetector(
+                            onTap: () async {
+                              selected = buildLabels().indexOf('Crear');
+                              reapplyFocus();
+                              await performCreate();
+                            },
+                            child: Container(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 8),
+                                decoration: (selected ==
+                                        buildLabels().indexOf('Crear'))
+                                    ? BoxDecoration(
+                                        borderRadius: BorderRadius.circular(6),
+                                        border:
+                                            Border.all(color: Colors.white24))
+                                    : null,
+                                child: ElevatedButton(
+                                    onPressed: performCreate,
+                                    child: const Text('Crear perfil')))),
+                      ),
+                    ])
+                  ],
                 ),
               ],
             );
@@ -710,15 +929,13 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
       );
     } finally {
       try {
-        removeListener.call();
+        removeListener?.call();
       } catch (_) {}
       dialogOpen = false;
       dialogSetSt = null;
-
       try {
         nameCtl.dispose();
       } catch (_) {}
-
       for (final fn in focusNodes) {
         try {
           fn.unfocus();
@@ -727,7 +944,6 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
           fn.dispose();
         } catch (_) {}
       }
-      // NO dispose del vlc player aquí: queremos que el fondo continúe.
     }
   }
 
@@ -1152,9 +1368,17 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
                                                 borderRadius:
                                                     BorderRadius.circular(24),
                                                 child: p.avatarPath != null
-                                                    ? Image.file(
-                                                        File(p.avatarPath!),
-                                                        fit: BoxFit.cover)
+                                                    ? (p.avatarPath!.startsWith(
+                                                            'asset:')
+                                                        ? Image.asset(
+                                                            p.avatarPath!
+                                                                .substring(6),
+                                                            fit: BoxFit.cover,
+                                                          )
+                                                        : Image.file(
+                                                            File(p.avatarPath!),
+                                                            fit: BoxFit.cover,
+                                                          ))
                                                     : Container(
                                                         color: const Color(
                                                             0xFF1E1F21),
@@ -1389,9 +1613,17 @@ class _EmuChullLoginScreenState extends State<EmuChullLoginScreen>
                                               borderRadius:
                                                   BorderRadius.circular(24),
                                               child: p.avatarPath != null
-                                                  ? Image.file(
-                                                      File(p.avatarPath!),
-                                                      fit: BoxFit.cover)
+                                                  ? (p.avatarPath!
+                                                          .startsWith('asset:')
+                                                      ? Image.asset(
+                                                          p.avatarPath!
+                                                              .substring(6),
+                                                          fit: BoxFit.cover,
+                                                        )
+                                                      : Image.file(
+                                                          File(p.avatarPath!),
+                                                          fit: BoxFit.cover,
+                                                        ))
                                                   : Container(
                                                       color: const Color(
                                                           0xFF1E1F21),

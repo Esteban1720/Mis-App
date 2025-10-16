@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/services.dart'
+    show LogicalKeyboardKey, RawKeyEvent, RawKeyDownEvent, RawKeyboard;
 import 'package:file_picker/file_picker.dart';
 import '../models.dart';
 import '../models/profile.dart';
@@ -261,6 +262,8 @@ class _EmulatorScreenState extends State<EmulatorScreen> {
     );
 
     _inputBinder.bind();
+    // Register RawKeyboard listener for desktop key events
+    RawKeyboard.instance.addListener(_onRawKey);
     // Also listen for the Triangle/Y button to toggle focused-action mode
     try {
       InputService.instance.onTriangle = () {
@@ -294,6 +297,7 @@ class _EmulatorScreenState extends State<EmulatorScreen> {
     _settings.masterVolume.removeListener(_settingsListener);
     _settings.sfxVolume.removeListener(_settingsListener);
     _settings.musicVolume.removeListener(_settingsListener);
+    RawKeyboard.instance.removeListener(_onRawKey);
     super.dispose();
   }
 
@@ -639,68 +643,67 @@ class _EmulatorScreenState extends State<EmulatorScreen> {
               ),
           ],
         ),
-        body: RawKeyboardListener(
-          focusNode: _focusNode,
-          onKey: _onRawKey,
-          child: Container(
-            decoration: BoxDecoration(
-              image: DecorationImage(
-                image: AssetImage(bg),
-                fit: BoxFit.cover,
-              ),
+        body: Container(
+          // Raw keyboard events are handled via RawKeyboard.instance listener
+          // FocusNode kept to manage focus for other widgets
+          key: const ValueKey('emulator_body'),
+          decoration: BoxDecoration(
+            image: DecorationImage(
+              image: AssetImage(bg),
+              fit: BoxFit.cover,
             ),
-            child: Column(
-              children: [
-                if (widget.emulator.gamesPath != null)
-                  Padding(
-                    padding: const EdgeInsets.all(8.0),
-                    child: Text('Carpeta: ${widget.emulator.gamesPath}',
-                        style: const TextStyle(fontSize: 12)),
-                  ),
-                Expanded(
-                  child: games.isEmpty
-                      ? const Center(
-                          child: Text('No se encontraron juegos',
-                              style: TextStyle(color: Colors.white)))
-                      : EmulatorGameGrid(
-                          games: games,
-                          columns: _columns,
-                          selectedIndex: _selectedIndex,
-                          focusedAppBar: _focusedAppBar,
-                          focusedActionIndex: _focusedActionIndex,
-                          emulatorName: widget.emulator.name,
-                          onSelect: (i) {
-                            setState(() {
-                              _selectedIndex = i;
-                              _focusedActionIndex = -1;
-                            });
-                            _playAction();
-                            _launchGame(games[i]);
-                          },
-                          onLongPress: (i) {
-                            setState(() {
-                              _selectedIndex = i;
-                              _focusedActionIndex = 0;
-                            });
-                            _playAction();
-                            _openGameActions(games[i]);
-                          },
-                          onDelete: (i) {
-                            _playAction();
-                            _deleteGame(games[i]);
-                          },
-                          onRename: (i) {
-                            _playAction();
-                            _renameGame(games[i]);
-                          },
-                          onChangeIcon: (i) {
-                            _playAction();
-                            _changeIcon(games[i]);
-                          },
-                        ),
+          ),
+          child: Column(
+            children: [
+              if (widget.emulator.gamesPath != null)
+                Padding(
+                  padding: const EdgeInsets.all(8.0),
+                  child: Text('Carpeta: ${widget.emulator.gamesPath}',
+                      style: const TextStyle(fontSize: 12)),
                 ),
-              ],
-            ),
+              Expanded(
+                child: games.isEmpty
+                    ? const Center(
+                        child: Text('No se encontraron juegos',
+                            style: TextStyle(color: Colors.white)))
+                    : EmulatorGameGrid(
+                        games: games,
+                        columns: _columns,
+                        selectedIndex: _selectedIndex,
+                        focusedAppBar: _focusedAppBar,
+                        focusedActionIndex: _focusedActionIndex,
+                        emulatorName: widget.emulator.name,
+                        onSelect: (i) {
+                          setState(() {
+                            _selectedIndex = i;
+                            _focusedActionIndex = -1;
+                          });
+                          _playAction();
+                          _launchGame(games[i]);
+                        },
+                        onLongPress: (i) {
+                          setState(() {
+                            _selectedIndex = i;
+                            _focusedActionIndex = 0;
+                          });
+                          _playAction();
+                          _openGameActions(games[i]);
+                        },
+                        onDelete: (i) {
+                          _playAction();
+                          _deleteGame(games[i]);
+                        },
+                        onRename: (i) {
+                          _playAction();
+                          _renameGame(games[i]);
+                        },
+                        onChangeIcon: (i) {
+                          _playAction();
+                          _changeIcon(games[i]);
+                        },
+                      ),
+              ),
+            ],
           ),
         ),
       ),
@@ -1142,4 +1145,9 @@ class _EmulatorScreenState extends State<EmulatorScreen> {
       _toggleFullScreen();
     }
   }
+
+  // Note: using RawKeyboardListener and RawKeyEvent handlers for compatibility.
 }
+
+// Adapter: translate KeyEvent to Raw-like handling when using KeyboardListener
+// adapter removed

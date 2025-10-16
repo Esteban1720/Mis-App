@@ -1,5 +1,8 @@
 // lib/services/audio_service.dart
 import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:emuchull/services/settings_service.dart';
 
@@ -14,6 +17,8 @@ class AudioService {
   AudioPlayer? _nav;
   AudioPlayer? _action;
   AudioPlayer? _launch;
+  AudioPlayer? _bgMusic;
+  String? _bgCurrentPath;
 
   bool _initialized = false;
   bool _disposed = false;
@@ -56,6 +61,15 @@ class AudioService {
     // Aplicar volúmenes actuales
     applyVolumesFromSettings();
 
+    // Inicializar background music player (loop) y aplicar según Settings
+    try {
+      _bgMusic = AudioPlayer();
+      await _bgMusic?.setReleaseMode(ReleaseMode.loop);
+      // Ensure volume is applied to the newly created bg player before it starts
+      applyVolumesFromSettings();
+      await _applyBgFromSettings();
+    } catch (_) {}
+
     // Escuchar cambios en settings para seguir sincronizados (una sola vez)
     if (!_settingsListenersRegistered) {
       final s = SettingsService.instance;
@@ -63,6 +77,9 @@ class AudioService {
         s.masterVolume.addListener(applyVolumesFromSettings);
         s.sfxVolume.addListener(applyVolumesFromSettings);
         s.musicVolume.addListener(applyVolumesFromSettings);
+        // listen to bg music enable/path changes
+        s.bgMusicEnabled.addListener(_applyBgFromSettings);
+        s.audio.bgMusicPath.addListener(_applyBgFromSettings);
         _settingsListenersRegistered = true;
       } catch (_) {
         // Si no son ValueNotifiers o falla, no hacemos nada
@@ -89,6 +106,81 @@ class AudioService {
     } catch (_) {}
     try {
       _launch?.setVolume(vol);
+    } catch (_) {}
+    try {
+      // bg music uses master * music volume
+      final music = (s.musicVolume.value as num).toDouble().clamp(0.0, 1.0);
+      final double bgVol = (master * music).clamp(0.0, 1.0);
+      _bgMusic?.setVolume(bgVol);
+    } catch (_) {}
+  }
+
+  Future<void> _applyBgFromSettings() async {
+    if (_disposed) return;
+    final s = SettingsService.instance;
+    final enabled = s.bgMusicEnabled.value;
+    final path = s.audio.bgMusicPath.value;
+    try {
+      if (enabled) {
+        if (path != null && path.isNotEmpty && File(path).existsSync()) {
+          if (_bgCurrentPath != path) {
+            // new file selected -> start from zero
+            _bgCurrentPath = path;
+            await _bgMusic?.setSource(DeviceFileSource(path));
+            await _bgMusic?.seek(Duration.zero);
+            // ensure correct volume before resuming
+            applyVolumesFromSettings();
+            await _bgMusic?.resume();
+          } else {
+            // same file, just ensure it's playing
+            applyVolumesFromSettings();
+            await _bgMusic?.resume();
+          }
+        } else {
+          // fallback to packaged asset
+          if (_bgCurrentPath != 'asset:bg_menu') {
+            _bgCurrentPath = 'asset:bg_menu';
+            await _bgMusic?.setSource(AssetSource('sounds/bg_menu.mp3'));
+            await _bgMusic?.seek(Duration.zero);
+            applyVolumesFromSettings();
+            await _bgMusic?.resume();
+          } else {
+            applyVolumesFromSettings();
+            await _bgMusic?.resume();
+          }
+        }
+      } else {
+        await _bgMusic?.stop();
+      }
+    } catch (e) {
+      debugPrint('AudioService: applyBgFromSettings error: $e');
+      try {
+        await _bgMusic?.setSource(AssetSource('sounds/bg_menu.mp3'));
+      } catch (_) {}
+    }
+  }
+
+  /// Called on logout to stop and reset background music so next login restarts.
+  Future<void> resetBgOnLogout() async {
+    try {
+      await _bgMusic?.stop();
+      _bgCurrentPath = null;
+    } catch (_) {}
+  }
+
+  /// Pausa la música de fondo (por ejemplo, al abrir un emulador en pantalla completa)
+  Future<void> pauseBgMusic() async {
+    if (_disposed) return;
+    try {
+      await _bgMusic?.pause();
+    } catch (_) {}
+  }
+
+  /// Reanuda la música de fondo si corresponde
+  Future<void> resumeBgMusic() async {
+    if (_disposed) return;
+    try {
+      await _bgMusic?.resume();
     } catch (_) {}
   }
 

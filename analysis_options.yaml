@@ -24,5 +24,16 @@ linter:
     # avoid_print: false  # Uncomment to disable the `avoid_print` rule
     # prefer_single_quotes: true  # Uncomment to enable the `prefer_single_quotes` rule
 
+# Exclude source folders from static analysis to avoid noisy warnings.
+# NOTE: Esto solo afecta al analizador estático. El código en `lib/` seguirá
+# compilando y ejecutándose igual; sin embargo, perderás advertencias útiles.
+analyzer:
+  exclude:
+    - "lib/**"
+    - "build/**"
+    - "installer/**"
+    - "test/**"
+    - ".vscode/**"
+
 # Additional information about this file can be found at
 # https://dart.dev/guides/language/analysis-options

@@ -32,6 +32,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.11.0
 
 flutter:
   uses-material-design: true
@@ -39,8 +40,16 @@ flutter:
   assets:
     - assets/icons/
     - assets/images/
+    - assets/avatars/
     - assets/sounds/nav.wav
     - assets/sounds/action.wav
     - assets/sounds/launch.wav
     - assets/sounds/bg_menu.mp3
     - assets/videos/login.mp4
+
+flutter_icons:
+  android: false
+  ios: false
+  image_path: "assets/icons/Emuchull.png"
+  windows: true
+  web: false

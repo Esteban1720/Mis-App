@@ -50,8 +50,9 @@ class _ProfileEmulatorHomeScreenState extends State<ProfileEmulatorHomeScreen>
   bool _cardActionMode = false;
   int _cardActionFocusedIndex = 0; // 0=rename,1=changeCover,2=delete
   static const int _columns = 4;
+  VoidCallback? _removeInputListener;
 
-  final AudioPlayer _bgMusic = AudioPlayer();
+  // Background music is managed globally by AudioService
   final SettingsService _settings = SettingsService.instance;
   late VoidCallback _settingsListener;
   // Removed unused fields: window focus and settings panel flags
@@ -66,6 +67,7 @@ class _ProfileEmulatorHomeScreenState extends State<ProfileEmulatorHomeScreen>
     });
     windowManager.addListener(this);
     _bindInputCallbacks();
+    // Ensure AudioService is initialized and bg music applied
     _preloadSounds();
     // Apply settings (volumes and bg music) and subscribe to changes
     _settingsListener = () {
@@ -353,59 +355,37 @@ class _ProfileEmulatorHomeScreenState extends State<ProfileEmulatorHomeScreen>
       _settings.bgMusicEnabled.removeListener(_settingsListener);
       _settings.audio.bgMusicPath.removeListener(_settingsListener);
     } catch (_) {}
-    _bgMusic.dispose();
+    // Do not dispose global audio service here
     super.dispose();
   }
 
   Future<void> _preloadSounds() async {
-    try {
-      await _bgMusic.setReleaseMode(ReleaseMode.loop);
-    } catch (_) {}
     await AudioService.instance.init();
-    // prepare background music according to settings
+    // AudioService will apply volumes and prepare bg music
     _applyVolumesFromSettings();
-    _prepareBgSource();
   }
 
   void _applyVolumesFromSettings() {
     final master = _settings.masterVolume.value;
     final music = _settings.musicVolume.value;
     try {
-      _bgMusic.setVolume((master * music).clamp(0.0, 1.0));
+      // AudioService handles bg music volume; ensure SFX volumes applied
+      AudioService.instance.applyVolumesFromSettings();
     } catch (e) {
       debugPrint('bg volume apply error (profile home): $e');
     }
-    AudioService.instance.applyVolumesFromSettings();
   }
 
   Future<void> _prepareBgSource() async {
-    try {
-      final enabled = _settings.bgMusicEnabled.value;
-      final path = _settings.audio.bgMusicPath.value;
-      if (enabled && path != null && File(path).existsSync()) {
-        await _bgMusic.setSource(DeviceFileSource(path));
-      } else {
-        await _bgMusic.setSource(AssetSource('sounds/bg_menu.mp3'));
-      }
-      if (_settings.bgMusicEnabled.value) {
-        await _bgMusic.seek(Duration.zero);
-        await _bgMusic.resume();
-      } else {
-        await _bgMusic.stop();
-      }
-    } catch (e) {
-      debugPrint('prepare bg source error (profile home): $e');
-      try {
-        await _bgMusic.setSource(AssetSource('sounds/bg_menu.mp3'));
-      } catch (_) {}
-    }
+    // Deprecated: background music is now managed by AudioService globally.
   }
 
   void _onBgMusicChanged() {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
       try {
-        await _prepareBgSource();
+        // AudioService handles background music changes
+        // nothing to do here
       } catch (e) {
         debugPrint('onBgMusicChanged error (profile home): $e');
       }
@@ -433,188 +413,199 @@ class _ProfileEmulatorHomeScreenState extends State<ProfileEmulatorHomeScreen>
   }
 
   void _bindInputCallbacks() {
-    final input = InputService.instance;
-    input.onLeft = () {
-      // if we're inside card action mode, navigate the action buttons
-      if (_cardActionMode &&
-          _selectedIndex >= 0 &&
-          _selectedIndex < emulators.length) {
-        setState(() =>
-            _cardActionFocusedIndex = (_cardActionFocusedIndex - 1 + 3) % 3);
-        return;
-      }
-      if (_selectedIndex == _topRegionIndex) {
-        setState(() =>
-            _topFocusIndex = (_topFocusIndex - 1) % _topFocusNodes.length);
-        _topFocusNodes[_topFocusIndex].requestFocus();
-        return;
-      }
-      if (_selectedIndex == _avatarIndex) {
-        setState(() => _selectedIndex = _logoutIndex);
-        return;
-      }
-      if (emulators.isEmpty) {
-        // If no emulators, ensure top region can be focused
-        setState(() {
-          _selectedIndex = _topRegionIndex;
-        });
-        _topFocusNodes[_topFocusIndex].requestFocus();
-        return;
-      }
-      setState(() => _selectedIndex = (_selectedIndex - 1) % emulators.length);
-    };
-    input.onRight = () {
-      // navigate actions when in card action mode
-      if (_cardActionMode &&
-          _selectedIndex >= 0 &&
-          _selectedIndex < emulators.length) {
-        setState(
-            () => _cardActionFocusedIndex = (_cardActionFocusedIndex + 1) % 3);
-        return;
-      }
-      if (_selectedIndex == _topRegionIndex) {
-        setState(() =>
-            _topFocusIndex = (_topFocusIndex + 1) % _topFocusNodes.length);
-        _topFocusNodes[_topFocusIndex].requestFocus();
-        return;
-      }
-      if (_selectedIndex == _avatarIndex) {
-        setState(() => _selectedIndex = _settingsIndex);
-        return;
-      }
-      if (emulators.isEmpty) {
-        setState(() => _selectedIndex = _topRegionIndex);
-        _topFocusNodes[_topFocusIndex].requestFocus();
-        return;
-      }
-      setState(() => _selectedIndex = (_selectedIndex + 1) % emulators.length);
-    };
-    input.onUp = () {
-      // Move focus to top action bar when moving up from the first row,
-      // or always move to top when there are no emulators.
-      if (_cardActionMode) return; // ignore up/down while in card action mode
-      if (_selectedIndex >= 0 && _selectedIndex < _columns) {
-        setState(() => _selectedIndex = _topRegionIndex);
-        _topFocusNodes[_topFocusIndex].requestFocus();
-        return;
-      }
-      if (emulators.isEmpty) {
-        setState(() => _selectedIndex = _topRegionIndex);
-        _topFocusNodes[_topFocusIndex].requestFocus();
-        return;
-      }
-      setState(() =>
-          _selectedIndex = (_selectedIndex - _columns) % emulators.length);
-    };
-    input.onDown = () {
-      // Move focus down from the top region or header to the grid (or to avatar)
-      if (_cardActionMode) return; // ignore up/down while in card action mode
-      if (_selectedIndex == _topRegionIndex ||
-          _selectedIndex == _avatarIndex ||
-          _selectedIndex == _logoutIndex ||
-          _selectedIndex == _settingsIndex) {
-        setState(
-            () => _selectedIndex = emulators.isNotEmpty ? 0 : _avatarIndex);
-        return;
-      }
-      if (emulators.isEmpty) {
-        // If there are no emulators and we're not on top, ensure we go to top
-        setState(() => _selectedIndex = _topRegionIndex);
-        return;
-      }
-      setState(() =>
-          _selectedIndex = (_selectedIndex + _columns) % emulators.length);
-    };
-    input.onActivate = () {
-      // If we're in card action mode, activate the focused action for the selected card
-      if (_cardActionMode &&
-          _selectedIndex >= 0 &&
-          _selectedIndex < emulators.length) {
-        _performCardAction(_selectedIndex, _cardActionFocusedIndex);
-        return;
-      }
-      if (_selectedIndex == _topRegionIndex) {
-        // activate focused top button
-        switch (_topFocusIndex) {
-          case 0:
-            _onAddEmulator();
-            break;
-          case 1:
-            Navigator.of(context).push(
-              MaterialPageRoute(
-                  builder: (_) => ProfileHomeScreen(profile: widget.profile)),
-            );
-            break;
-          case 2:
-            _openSettingsPanel();
-            break;
-          case 3:
-            ProfileService.instance.clearCurrentProfile();
-            Navigator.of(context).pushReplacement(
-              MaterialPageRoute(builder: (_) => const EmuChullLoginScreen()),
-            );
-            break;
+    // Use pushListener so this screen's input handlers are stacked and restored
+    // correctly when navigating to other screens.
+    _removeInputListener?.call();
+    _removeInputListener = InputService.instance.pushListener(InputListener(
+      onLeft: () {
+        // if we're inside card action mode, navigate the action buttons
+        if (_cardActionMode &&
+            _selectedIndex >= 0 &&
+            _selectedIndex < emulators.length) {
+          setState(() =>
+              _cardActionFocusedIndex = (_cardActionFocusedIndex - 1 + 3) % 3);
+          return;
         }
-        return;
-      }
-      if (_selectedIndex == _avatarIndex) {
-        Navigator.of(context).push(
-          MaterialPageRoute(
-              builder: (_) => ProfileHomeScreen(profile: widget.profile)),
-        );
-        return;
-      }
-      if (_selectedIndex == _logoutIndex) {
-        ProfileService.instance.clearCurrentProfile();
+        if (_selectedIndex == _topRegionIndex) {
+          setState(() =>
+              _topFocusIndex = (_topFocusIndex - 1) % _topFocusNodes.length);
+          _topFocusNodes[_topFocusIndex].requestFocus();
+          return;
+        }
+        if (_selectedIndex == _avatarIndex) {
+          setState(() => _selectedIndex = _logoutIndex);
+          return;
+        }
+        if (emulators.isEmpty) {
+          // If no emulators, ensure top region can be focused
+          setState(() {
+            _selectedIndex = _topRegionIndex;
+          });
+          _topFocusNodes[_topFocusIndex].requestFocus();
+          return;
+        }
+        setState(
+            () => _selectedIndex = (_selectedIndex - 1) % emulators.length);
+      },
+      onRight: () {
+        // navigate actions when in card action mode
+        if (_cardActionMode &&
+            _selectedIndex >= 0 &&
+            _selectedIndex < emulators.length) {
+          setState(() =>
+              _cardActionFocusedIndex = (_cardActionFocusedIndex + 1) % 3);
+          return;
+        }
+        if (_selectedIndex == _topRegionIndex) {
+          setState(() =>
+              _topFocusIndex = (_topFocusIndex + 1) % _topFocusNodes.length);
+          _topFocusNodes[_topFocusIndex].requestFocus();
+          return;
+        }
+        if (_selectedIndex == _avatarIndex) {
+          setState(() => _selectedIndex = _settingsIndex);
+          return;
+        }
+        if (emulators.isEmpty) {
+          setState(() => _selectedIndex = _topRegionIndex);
+          _topFocusNodes[_topFocusIndex].requestFocus();
+          return;
+        }
+        setState(
+            () => _selectedIndex = (_selectedIndex + 1) % emulators.length);
+      },
+      onUp: () {
+        // Move focus to top action bar when moving up from the first row,
+        // or always move to top when there are no emulators.
+        if (_cardActionMode) return; // ignore up/down while in card action mode
+        if (_selectedIndex >= 0 && _selectedIndex < _columns) {
+          setState(() => _selectedIndex = _topRegionIndex);
+          _topFocusNodes[_topFocusIndex].requestFocus();
+          return;
+        }
+        if (emulators.isEmpty) {
+          setState(() => _selectedIndex = _topRegionIndex);
+          _topFocusNodes[_topFocusIndex].requestFocus();
+          return;
+        }
+        setState(() =>
+            _selectedIndex = (_selectedIndex - _columns) % emulators.length);
+      },
+      onDown: () {
+        // Move focus down from the top region or header to the grid (or to avatar)
+        if (_cardActionMode) return; // ignore up/down while in card action mode
+        if (_selectedIndex == _topRegionIndex ||
+            _selectedIndex == _avatarIndex ||
+            _selectedIndex == _logoutIndex ||
+            _selectedIndex == _settingsIndex) {
+          setState(
+              () => _selectedIndex = emulators.isNotEmpty ? 0 : _avatarIndex);
+          return;
+        }
+        if (emulators.isEmpty) {
+          // If there are no emulators and we're not on top, ensure we go to top
+          setState(() => _selectedIndex = _topRegionIndex);
+          return;
+        }
+        setState(() =>
+            _selectedIndex = (_selectedIndex + _columns) % emulators.length);
+      },
+      onActivate: () {
+        // If we're in card action mode, activate the focused action for the selected card
+        if (_cardActionMode &&
+            _selectedIndex >= 0 &&
+            _selectedIndex < emulators.length) {
+          _performCardAction(_selectedIndex, _cardActionFocusedIndex);
+          return;
+        }
+        if (_selectedIndex == _topRegionIndex) {
+          // activate focused top button
+          switch (_topFocusIndex) {
+            case 0:
+              _onAddEmulator();
+              break;
+            case 1:
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                    builder: (_) => ProfileHomeScreen(profile: widget.profile)),
+              );
+              break;
+            case 2:
+              _openSettingsPanel();
+              break;
+            case 3:
+              ProfileService.instance.clearCurrentProfile();
+              Navigator.of(context).pushReplacement(
+                MaterialPageRoute(builder: (_) => const EmuChullLoginScreen()),
+              );
+              break;
+          }
+          return;
+        }
+        if (_selectedIndex == _avatarIndex) {
+          Navigator.of(context).push(
+            MaterialPageRoute(
+                builder: (_) => ProfileHomeScreen(profile: widget.profile)),
+          );
+          return;
+        }
+        if (_selectedIndex == _logoutIndex) {
+          ProfileService.instance.clearCurrentProfile();
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(builder: (_) => const EmuChullLoginScreen()),
+          );
+          return;
+        }
+        if (_selectedIndex == _settingsIndex) {
+          _openSettingsPanel();
+          return;
+        }
+        if (_selectedIndex >= 0 && _selectedIndex < emulators.length) {
+          _openEmulator(_selectedIndex);
+        }
+      },
+      onBack: () {
+        // if in card action mode, exit it first
+        if (_cardActionMode) {
+          setState(() => _cardActionMode = false);
+          return;
+        }
+        // fallback: go back to profile selection
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const EmuChullLoginScreen()),
-        );
-        return;
-      }
-      if (_selectedIndex == _settingsIndex) {
-        _openSettingsPanel();
-        return;
-      }
-      if (_selectedIndex >= 0 && _selectedIndex < emulators.length) {
-        _openEmulator(_selectedIndex);
-      }
-    };
-    input.onBack = () {
-      // if in card action mode, exit it first
-      if (_cardActionMode) {
-        setState(() => _cardActionMode = false);
-        return;
-      }
-      // fallback: go back to profile selection
-      Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const EmuChullLoginScreen()));
-    };
-
-    // triangle toggles action mode on the focused card
-    input.onTriangle = () {
-      if (_selectedIndex >= 0 && _selectedIndex < emulators.length) {
-        setState(() {
-          _cardActionMode = !_cardActionMode;
-          if (_cardActionMode) _cardActionFocusedIndex = 0;
-        });
-        return;
-      }
-    };
+            MaterialPageRoute(builder: (_) => const EmuChullLoginScreen()));
+      },
+      onTriangle: () {
+        if (_selectedIndex >= 0 && _selectedIndex < emulators.length) {
+          setState(() {
+            _cardActionMode = !_cardActionMode;
+            if (_cardActionMode) _cardActionFocusedIndex = 0;
+          });
+          return;
+        }
+      },
+    ));
   }
 
   void _unbindInputCallbacks() {
-    final input = InputService.instance;
-    input.onLeft = null;
-    input.onRight = null;
-    input.onUp = null;
-    input.onDown = null;
-    input.onActivate = null;
-    input.onBack = null;
+    try {
+      _removeInputListener?.call();
+    } catch (_) {}
+    _removeInputListener = null;
   }
 
-  void _openEmulator(int index) {
+  Future<void> _openEmulator(int index) async {
     if (index < 0 || index >= emulators.length) return;
-    _bgMusic.stop();
+    // Background music is global; ask AudioService to pause when opening emulator UI
+    try {
+      await AudioService.instance.pauseBgMusic();
+    } catch (_) {}
+    // Remove this screen's input listener so the pushed EmulatorScreen can
+    // become the top input handler (EmulatorScreen binds direct handlers).
+    try {
+      _removeInputListener?.call();
+    } catch (_) {}
+    _removeInputListener = null;
+
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -630,7 +621,12 @@ class _ProfileEmulatorHomeScreenState extends State<ProfileEmulatorHomeScreen>
       ),
     ).then((_) async {
       if (!mounted) return;
-      await _bgMusic.resume();
+      // restore background music (AudioService will resume if appropriate)
+      try {
+        await AudioService.instance.resumeBgMusic();
+      } catch (_) {}
+      // Re-bind this screen's input callbacks so navigation and triangle
+      // behavior works again after returning from the emulator.
       _bindInputCallbacks();
     });
   }
@@ -779,6 +775,9 @@ class _ProfileEmulatorHomeScreenState extends State<ProfileEmulatorHomeScreen>
     try {
       ProfileService.instance.clearCurrentProfile();
     } catch (_) {}
+    try {
+      await AudioService.instance.resetBgOnLogout();
+    } catch (_) {}
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(builder: (_) => const EmuChullLoginScreen()),
@@ -905,7 +904,10 @@ class _ProfileEmulatorHomeScreenState extends State<ProfileEmulatorHomeScreen>
                           radius: 34,
                           backgroundColor: Colors.white12,
                           backgroundImage: current.avatarPath != null
-                              ? FileImage(File(current.avatarPath!))
+                              ? (current.avatarPath!.startsWith('asset:')
+                                  ? AssetImage(current.avatarPath!.substring(6))
+                                      as ImageProvider
+                                  : FileImage(File(current.avatarPath!)))
                               : null,
                           child: current.avatarPath == null
                               ? Text(current.name.isNotEmpty

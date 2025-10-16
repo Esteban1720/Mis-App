@@ -11,7 +11,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64
 WizardStyle=modern
 PrivilegesRequired=admin
-SetupIconFile=..\assets\icons\emuchull.ico
+SetupIconFile=..\assets\icons\APP.ico
 
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
@@ -20,11 +20,11 @@ Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 ; Copia los archivos generados por `flutter build windows` (ejecutable + dll + assets)
 Source: "..\build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
 ; Copia el icono del proyecto para que los accesos directos puedan usarlo
-Source: "..\assets\icons\emuchull.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\assets\icons\APP.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\EMUCHULL"; Filename: "{app}\emuchull.exe"; IconFilename: "{app}\emuchull.ico"
-Name: "{commondesktop}\EMUCHULL"; Filename: "{app}\emuchull.exe"; Tasks: desktopicon; IconFilename: "{app}\emuchull.ico"
+Name: "{group}\EMUCHULL"; Filename: "{app}\emuchull.exe"; IconFilename: "{app}\APP.ico"
+Name: "{commondesktop}\EMUCHULL"; Filename: "{app}\emuchull.exe"; Tasks: desktopicon; IconFilename: "{app}\APP.ico"
 
 [Tasks]
 Name: desktopicon; Description: "Crear acceso directo en el escritorio"; GroupDescription: "Accesos directos"; Flags: unchecked

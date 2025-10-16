@@ -1,3 +1,10 @@
+param(
+    [string]$PfxPath = $null,
+    [string]$PfxPassword = $null,
+    # Ruta relativa al PNG del nuevo icono (por defecto en assets)
+    [string]$IconPng = 'assets\icons\Emuchull.png'
+)
+
 # Script para automatizar build y creación del instalador
 # Ejecutar PowerShell como administrador si el build o el instalador lo requiere
 
@@ -5,11 +12,39 @@ $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 # Ajustar al root del repo si se ejecuta desde installer
 $root = Resolve-Path "$projectRoot\.." | Select-Object -ExpandProperty Path
 
-$sourceIcon = Join-Path $root 'assets\icons\emuchull.ico'
+$sourceIco = Join-Path $root 'assets\icons\APP.ico'
+$sourcePng = Join-Path $root $IconPng
 $destIcon = Join-Path $root 'windows\runner\resources\app_icon.ico'
 
-Write-Host "Copiando icono desde $sourceIcon a $destIcon"
-Copy-Item -Path $sourceIcon -Destination $destIcon -Force
+Write-Host "Comprobando icono en $sourceIco"
+if (!(Test-Path $sourceIco)) {
+    Write-Host "No existe .ico. Intentando generar $sourceIco desde PNG $sourcePng usando ImageMagick (magick)..."
+    if (Test-Path $sourcePng) {
+        # Intentar usar ImageMagick (magick) para crear un .ico con múltiples tamaños
+        $magick = Get-Command magick -ErrorAction SilentlyContinue
+        if ($magick) {
+            Write-Host "ImageMagick detectado: generando .ico..."
+            & magick "convert" "$sourcePng" -define icon:auto-resize=256,128,64,48,32,16 "$sourceIco"
+            if (!(Test-Path $sourceIco)) {
+                Write-Warning "No se pudo generar $sourceIco automáticamente. Revisa ImageMagick o crea manualmente el .ico en assets/icons/APP.ico"
+            } else {
+                Write-Host ".ico generado: $sourceIco"
+            }
+        } else {
+        Write-Warning "ImageMagick (magick) no encontrado. Por favor convierte $sourcePng a $sourceIco manualmente o instala ImageMagick."
+        }
+    } else {
+    Write-Warning "PNG de icono ($sourcePng) no encontrado. Asegúrate de tener assets/icons/Emuchull.png o crea assets/icons/APP.ico manualmente."
+    }
+}
+
+if (!(Test-Path $sourceIco)) {
+    Write-Error "No se encontró el icono .ico necesario en assets/icons/APP.ico. Crea el .ico (por ejemplo usando ImageMagick) y vuelve a ejecutar el script."
+    exit 1
+}
+
+Write-Host "Copiando icono desde $sourceIco a $destIcon"
+Copy-Item -Path $sourceIco -Destination $destIcon -Force
 
 Write-Host "Construyendo la app Windows (flutter build windows)"
 # Cambia esto si necesitas ejecutar con un flutter específico
@@ -22,13 +57,6 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Pop-Location
-
-# Opciones de firma (opcional)
-# Proporciona ruta al PFX y contraseña si deseas firmar el instalador
-param(
-    [string]$PfxPath = $null,
-    [string]$PfxPassword = $null
-)
 
 # Compilar instalador con Inno Setup
 $iss = Join-Path $root 'installer\playstations.iss'

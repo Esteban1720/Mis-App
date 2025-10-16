@@ -14,7 +14,6 @@ import 'package:flutter/services.dart'
 import 'package:file_picker/file_picker.dart';
 // removed unused dart:io import
 import '../services/settings_service.dart';
-import '../services/controller_light_service.dart';
 import '../widgets/gamepad_listener.dart';
 import '../services/audio_service.dart';
 
@@ -61,8 +60,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
   // focus map
   int _focusIndex = 0;
   int get _maxFocus => _focusKeys.length - 1;
-  // previous focus before entering palette (used to restore on exit)
-  int? _prevFocusBeforePalette;
+  // previous focus placeholder (palette removed)
 
   bool _indexHasVisibleWidget(int idx) {
     final key = _focusKeys[idx];
@@ -98,8 +96,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
   late bool _pendingBgMusicEnabled;
   String? _pendingBgMusicPath;
   late bool _pendingInvertYAxis;
-  // Controller color (ARGB int) pending selection
-  late int _pendingControllerColor;
+  // Controller color pending removed (palette not used)
 
   static const double _step = 0.05;
 
@@ -108,7 +105,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
 
   final ScrollController _scrollController = ScrollController();
   final Map<int, GlobalKey> _focusKeys = {
-    for (var i = 0; i <= 10; i++) i: GlobalKey()
+    for (var i = 0; i <= 9; i++) i: GlobalKey()
   };
   final FocusNode _keyboardFocusNode = FocusNode();
 
@@ -125,7 +122,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
     _pendingBgMusicEnabled = s.bgMusicEnabled.value;
     _pendingBgMusicPath = s.audio.bgMusicPath.value;
     _pendingInvertYAxis = s.invertYAxis.value;
-    _pendingControllerColor = s.controllerColor.value;
+    // controller color removed from settings panel
 
     if (widget.controller != null) {
       widget.controller!.onUp = _onUp;
@@ -146,7 +143,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
     s.sfxVolume.addListener(_onExternalChange);
     s.bgMusicEnabled.addListener(_onExternalChange);
     s.audio.bgMusicPath.addListener(_onExternalChange);
-    s.controllerColor.addListener(_onExternalChange);
+    // controller color listener removed (palette removed)
     s.invertYAxis.addListener(_onExternalChange);
 
     _tryLoadBg();
@@ -234,7 +231,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
       _pendingFullscreen = s.isFullscreen.value;
       _pendingBgMusicEnabled = s.bgMusicEnabled.value;
       _pendingBgMusicPath = s.audio.bgMusicPath.value;
-      _pendingControllerColor = s.controllerColor.value;
+      // controller color handling removed
       _pendingInvertYAxis = s.invertYAxis.value;
 
       final externalSize = s.windowSize.value;
@@ -336,10 +333,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
           // toggle bg music off
           _pendingBgMusicEnabled = false;
           break;
-        case 10:
-          // navigate palette left
-          _movePaletteSelection(-1);
-          break;
+        // palette removed
       }
     });
   }
@@ -369,10 +363,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
           // toggle bg music on
           _pendingBgMusicEnabled = true;
           break;
-        case 10:
-          // navigate palette right
-          _movePaletteSelection(1);
-          break;
+        // palette removed
       }
     });
   }
@@ -407,11 +398,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
       case 6:
         setState(() => _pendingInvertYAxis = !_pendingInvertYAxis);
         break;
-      case 10:
-        // Activate current palette selection (already applied on navigation/tap)
-        // provide haptic/feedback via SFX
-        AudioService.instance.playAction();
-        break;
+      // palette removed
       case 7:
         await _savePendingAndClose();
         break;
@@ -430,14 +417,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
 
   void _onBack() {
     if (!mounted) return;
-    // if palette is focused, exit palette and restore previous focus
-    if (_focusIndex == 10) {
-      setState(() {
-        _focusIndex = _prevFocusBeforePalette ?? 0;
-      });
-      AudioService.instance.playAction();
-      return;
-    }
+    // palette removed: behave as normal back action
     Navigator.pop(context);
   }
 
@@ -472,7 +452,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
       _pendingBgMusicEnabled = true;
       _pendingBgMusicPath = null;
       _pendingInvertYAxis = false;
-      _pendingControllerColor = s.controllerColor.value;
+      // controller color removed from settings panel
 
       // si tenemos resoluciones detectadas, mapear al más cercano
       if (_resolutions.isNotEmpty) {
@@ -505,8 +485,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
       s.masterVolume.value = _pendingMasterVolume;
       s.musicVolume.value = _pendingMusicVolume;
       s.sfxVolume.value = _pendingSfxVolume;
-      // apply controller color
-      s.controllerColor.value = _pendingControllerColor;
+      // controller color removed from settings panel
       s.bgMusicEnabled.value = _pendingBgMusicEnabled;
       s.audio.bgMusicPath.value = _pendingBgMusicPath;
 
@@ -524,18 +503,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
         debugPrint('Error saving settings to disk: $e');
       }
 
-      // Attempt to apply controller color via native helper (Windows)
-      try {
-        final applied = await ControllerLightService.applyColorFromInt(
-            _pendingControllerColor);
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(applied
-                ? 'Color aplicado al mando (si el software lo permitió).'
-                : 'No se pudo aplicar color al mando. Asegúrate de cerrar DS4Windows o ejecutar como administrador.')));
-      } catch (e) {
-        debugPrint('ControllerLight apply error: $e');
-      }
+      // controller color native application removed
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -715,18 +683,10 @@ class _SettingsPanelState extends State<SettingsPanel> {
       _onRight();
       return;
     }
-    // Tab toggles entering/exiting the palette for quick access
+    // Tab behavior simplified (palette removed)
     if (key == LogicalKeyboardKey.tab) {
-      // enter palette if not currently focused
-      if (_focusIndex != 10) {
-        _prevFocusBeforePalette = _focusIndex;
-        setState(() => _focusIndex = 10);
-        _ensureFocusVisible();
-      } else {
-        // exit palette
-        setState(() => _focusIndex = _prevFocusBeforePalette ?? 0);
-      }
-      AudioService.instance.playNav();
+      // move focus to next control
+      _onDown();
       return;
     }
     if (key == LogicalKeyboardKey.enter ||
@@ -1236,26 +1196,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
                                         style:
                                             TextStyle(color: Colors.white54)),
                                     const SizedBox(height: 12),
-                                    const Text('Color del mando',
-                                        style: TextStyle(
-                                            color: Colors.white54,
-                                            fontWeight: FontWeight.bold)),
-                                    const SizedBox(height: 8),
-                                    // Paleta de colores personalizada (basada en la imagen proporcionada)
-                                    Container(
-                                      key: _focusKeys[10],
-                                      padding: const EdgeInsets.all(6.0),
-                                      decoration: BoxDecoration(
-                                        borderRadius:
-                                            BorderRadius.circular(8.0),
-                                        border: _focusIndex == 10
-                                            ? Border.all(
-                                                color: const Color(0xFF66E0FF),
-                                                width: 2.0)
-                                            : null,
-                                      ),
-                                      child: _buildControllerColorPalette(),
-                                    ),
+                                    // controller color palette removed
                                     const Spacer(),
                                     Row(
                                         mainAxisAlignment:
@@ -1319,8 +1260,6 @@ class _SettingsPanelState extends State<SettingsPanel> {
         return 'Selecciona o desactiva la música que sonará en el menú.';
       case 6:
         return 'Invierte el eje vertical (Y) para el control de la cámara.';
-      case 10:
-        return 'Selecciona el color que se usará para tematizar el mando (PS4/PS5).';
       case 7:
         return 'Pulsa ▲ para guardar y aplicar los cambios.';
       case 8:
@@ -1332,68 +1271,5 @@ class _SettingsPanelState extends State<SettingsPanel> {
     }
   }
 
-  // --- Controller color palette UI ---
-  static const List<int> _kControllerPalette = [
-    0xFF009688, // teal
-    0xFFF48FB1, // pink
-    0xFF81D4FA, // light blue
-    0xFF2E7D32, // green
-    0xFFE64A19, // red/orange
-    0xFFF9F59F, // soft yellow
-    0xFFCE93D8, // lavender
-    0xFFA5D6A7, // mint
-    0xFFF0BFA8, // peach
-    0xFF2196F3, // vivid blue
-  ];
-
-  Widget _buildControllerColorPalette() {
-    // Render a grid of swatches. The selected swatch gets a highlight border.
-    final swatches = List<Widget>.generate(_kControllerPalette.length, (i) {
-      final colInt = _kControllerPalette[i];
-      final color = Color(colInt);
-      final selected = _pendingControllerColor == colInt;
-      return GestureDetector(
-        onTap: () {
-          setState(() {
-            _pendingControllerColor = colInt;
-          });
-        },
-        child: Container(
-          margin: const EdgeInsets.all(6.0),
-          width: 46,
-          height: 46,
-          decoration: BoxDecoration(
-            color: color,
-            borderRadius: BorderRadius.circular(8.0),
-            border: selected
-                ? Border.all(color: Colors.white.withOpacity(0.95), width: 3)
-                : Border.all(color: Colors.white12, width: 1.5),
-            boxShadow: [
-              if (selected)
-                BoxShadow(
-                    color: Colors.black38, blurRadius: 6, offset: Offset(0, 3))
-            ],
-          ),
-        ),
-      );
-    });
-
-    return Wrap(
-      alignment: WrapAlignment.start,
-      children: swatches,
-    );
-  }
-
-  void _movePaletteSelection(int delta) {
-    if (_kControllerPalette.isEmpty) return;
-    final currIndex = _kControllerPalette.indexOf(_pendingControllerColor);
-    int next = currIndex;
-    if (next < 0) next = 0;
-    next = (next + delta) % _kControllerPalette.length;
-    if (next < 0) next += _kControllerPalette.length;
-    setState(() {
-      _pendingControllerColor = _kControllerPalette[next];
-    });
-    AudioService.instance.playNav();
-  }
+  // Controller color palette UI removed
 }
