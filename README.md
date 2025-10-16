@@ -96,35 +96,212 @@ Si hay errores en la compilación o el script no encuentra `ISCC.exe`, ajusta la
 
 - `lib/` — código Dart/Flutter principal
 	- `main.dart` — entrypoint
-	- `screens/` — pantallas y UI (incluye `settings_panel.dart`, `emulator_screen.dart`, etc.)
-	- `services/` — helpers y servicios como `settings_service.dart`, `audio_service.dart`, `emulator_manager.dart`, `controller_light_service.dart` (si aplica)
-	- `widgets/`, `ui/` — componentes UI reutilizables y temas
-- `assets/` — iconos, imágenes, sonidos
-- `installer/` — script PowerShell, plantilla Inno Setup `.iss` y output del instalador
-- `build/` — artefactos de build
+	﻿# EmuChull — Documentación completa y guía para desarrolladores
 
-## Notas técnicas y recomendaciones
+	Este README explica en detalle la arquitectura, los componentes, las clases y flujos principales de la aplicación EmuChull (Flutter Desktop). Está escrito en español y pensado para que cualquier desarrollador que reciba este repositorio entienda cómo funciona la aplicación, qué hace cada módulo y cómo realizar cambios sin romper funcionalidades existentes.
 
-- Deprecaciones: el proyecto usa APIs que fueron marcadas como deprecated por Flutter (por ejemplo `RawKeyboardListener` y `RawKeyEvent`). Recomiendo migrar a `KeyboardListener` y `KeyEvent` para mantener compatibilidad futura.
-- Concurrencia/async: hay advertencias `use_build_context_synchronously` en varios lugares; revisar `if (mounted)` y evitar acceder a `BuildContext` después de await donde no sea seguro.
-- Tests: agregar pruebas unitarias (ej.: `test/widget_test.dart` está presente como ejemplo). Añadir pruebas para `SettingsService` y lógica crítica.
-- Localización: si la app se destina a múltiples idiomas, centralizar cadenas de texto y usar `flutter_localizations`.
+	Si vas a trabajar en este proyecto, empieza por leer `main.dart`, `lib/services/profile_service.dart` y `lib/services/input_service.dart` para comprender la inicialización, la persistencia de perfiles y el sistema de entrada (gamepad/teclado).
 
-## Cómo contribuir
+	---
 
-- Abre un issue para reportar bugs o solicitar mejoras.
-- Para cambios grandes (migraciones de API, refactorizaciones), crea una branch con nombre descriptivo y abre un pull request con la descripción de los cambios y pasos para probar.
+	## Resumen / Propósito
 
-## Créditos y licencia
+	EmuChull es un frontend orientado a emuladores. Sus funciones principales son:
 
-Este repositorio contiene trabajo personalizado. Incluye recursos de terceros si se usan (icons, imágenes) — revisa sus licencias.
+	- Gestión de perfiles de usuario (avatares empaquetados o importados, opción de PIN privado).
+	- Gestión de emuladores y su librería de juegos (escaneo o añadidos manualmente).
+	- Lanzamiento de emuladores y juegos con navegación tipo consola (soporte para gamepad/teclado).
+	- Reproducción de efectos de sonido (SFX) y música de fondo persistente.
 
-Si deseas que incluya un archivo `LICENSE` o especifique una licencia concreta (MIT, Apache-2.0, etc.), dímelo y lo añado.
+	La app está optimizada para escritorio (Windows, con adaptaciones para otras plataformas) y usa plugins nativos para vídeo/audio cuando están disponibles (`dart_vlc`, `audioplayers`).
 
----
+	---
 
-Si quieres, puedo además:
-- Generar un README específico en `installer/README.md` con instrucciones paso a paso para crear el instalador y requisitos (Inno Setup, ImageMagick, signtool).
-- Ejecutar `flutter build windows --release` aquí para comprobar que la build completa funciona (ten en cuenta que tardará varios minutos).
+	## Estructura del proyecto (alto nivel)
 
-¿Qué prefieres que haga a continuación?
+	- `lib/` — código fuente:
+		- `main.dart` — inicializaciones globales y arranque de la app.
+		- `models/` — modelos de dominio (`Profile`, `EmulatorData`, `GameData`).
+		- `screens/` — pantallas UI (login, perfiles, emulador, ajustes).
+		- `services/` — singletons con lógica de negocio y persistencia (AudioService, ProfileService, InputService, SettingsService, EmulatorManager, etc.).
+		- `widgets/` — componentes visuales reutilizables (keyboard, cards, dialogs).
+		- `ui/` — utilidades y temas.
+	- `assets/` — imágenes, sonidos y videos empaquetados.
+	- `installer/`, `windows/`, `macos/`, `linux/` — scripts y recursos específicos de plataforma.
+
+	---
+
+	## Dependencias clave (extraídas de `pubspec.yaml`)
+
+	- `audioplayers` — reproducción de SFX y música de fondo.
+	- `dart_vlc` — opcional, usado para fondo en vídeo (requiere libVLC instaladas o bundling).
+	- `file_picker`, `path_provider` — para importar avatares y escribir en documentos de la app.
+	- `window_manager`, `win32`, `win32_gamepad` — funcionalidades específicas de escritorio y gamepad en Windows.
+	- `shared_preferences` — persistencia simple de la lista de perfiles.
+
+	---
+
+	## Documentación de módulos y clases (detallada)
+
+	Abajo se describen los módulos más importantes. Cada sección indica responsabilidades, contratos, formatos de datos y notas para quien vaya a modificar el código.
+
+	### `lib/main.dart`
+
+	- Función: arranque de la aplicación. Inicializa librerías nativas, servicios y la ventana.
+	- Tareas importantes:
+		- Inicializa `DartVLC` con varias estrategias para localizar libVLC (carpeta `windows/vlc`, carpeta junto al exe, Program Files). Intenta varias firmas de `DartVLC.initialize` dinámicamente.
+		- Inicializa `window_manager` y aplica tamaño/modo fullscreen según `SettingsService`.
+		- Llama `AudioService.instance.init()` y `InputService.instance.initialize()`.
+		- Ejecuta `runApp(MyApp())`.
+
+	Notas para cambios: si integras otro plugin nativo, añade fallbacks para no romper la inicialización en máquinas donde ese plugin no esté disponible.
+
+	### Modelos (en `lib/models` y `lib/models/*.dart`)
+
+	- GameData
+		- Campos: `path`, `displayName`, `coverUrl`.
+		- Uso: representa un juego en la librería de un emulador.
+
+	- EmulatorData
+		- Campos principales: `name`, `exePath`, `supportedExts`, `games`, `coverPath`, `launchArgs`, `workingDirectory`, `manualAddsOnly`, `launchFullscreen`.
+		- Uso: representa la configuración de un emulador y su lista de juegos. Serializable a JSON con `toJson()` y reconstruible con `fromJson()`.
+
+	- Profile
+		- Campos: `id`, `name`, `avatarPath`, `isPrivate`, `pinHash`, `emulatorIds`, `gamePaths`, `gamesByEmulator`.
+		- `avatarPath` puede ser:
+			- `asset:assets/avatars/xxx.png` — avatar empaquetado.
+			- Ruta absoluta en disco — avatar importado.
+		- Persistencia: `ProfileService` serializa la lista completa de perfiles.
+
+	### `ProfileService` (`lib/services/profile_service.dart`)
+
+	- Singleton: `ProfileService.instance`.
+	- Responsabilidades:
+		- Cargar perfiles desde `SharedPreferences` (clave `_kProfilesKey`).
+		- Guardar perfiles (serializa lista a JSON).
+		- `hashPin(pin)` produce SHA-256 con salt interno.
+		- Utilities: `setProfileGamesForEmulator`, `getProfileGamesForEmulator`, `normalizeProfileEmulatorIds`, `removeEmulatorFromAllProfiles`.
+
+	Contratos y consideraciones:
+	- `loadProfiles()` hace migraciones simples y devuelve una lista vacía ante errores (protección frente a perfiles corruptos).
+	- Evita acceder a `SharedPreferences` en tight loops; trabaja con copias y guarda cuando haya cambios significativos.
+
+	### `AudioService` (`lib/services/audio_service.dart`)
+
+	- Singleton: `AudioService.instance`.
+	- Manejo de recursos:
+		- Players: `_nav`, `_action`, `_launch`, `_bgMusic`.
+		- `init()` crea los players y registra listeners en `SettingsService` para sincronizar volúmenes y pistas.
+		- `_applyBgFromSettings()` mantiene la reproducción de background music según `SettingsService.audio.bgMusicPath` y `SettingsService.bgMusicEnabled`.
+		- `resetBgOnLogout()` resetea `_bgCurrentPath` y detiene la música para que al entrar de nuevo el bg empiece desde 0.
+
+	Buenas prácticas:
+	- Para cambiar la pista background sin reiniciar la posición, el servicio comprueba `_bgCurrentPath`. Si la misma ruta sigue activa, hace `resume()`; si cambió la ruta, hace `seek(Duration.zero)`.
+	- Si la app debe reiniciar la música al cambiar perfil, asegúrate de invocar `resetBgOnLogout()` en el flujo de logout.
+
+	### `InputService` (`lib/services/input_service.dart`)
+
+	- Rol: abstraer entradas (gamepad/teclado) a eventos de alto nivel.
+	- API: `pushListener(InputListener)` que devuelve una `VoidCb` para removerlo.
+	- Nota crítica: listeners son apilables; cada `pushListener()` debe tener su `remove` posterior para no acumular eventos. Usa `try { remove?.call(); }` en `finally`.
+
+	### Emuladores (`EmulatorManager`, `EmulatorRunner`, `EmulatorHelper`)
+
+	- `EmulatorManager`: mantiene la lista de emuladores y provee operaciones CRUD sobre `EmulatorData`.
+	- `EmulatorRunner`: inicia procesos nativos del emulador con argumentos y working directory; tiene hooks para pausar la música de fondo y restaurarla.
+	- `EmulatorHelper`: utilidades para escaneo y validación de juegos.
+
+	### Screens / Widgets
+
+	- `emuchull_login.dart`: pantalla principal de selección/creación de perfiles. Implementa:
+		- Grilla de perfiles (tarjetas con avatar y nombre).
+		- Diálogo `Crear perfil`: lee `AssetManifest.json` para mostrar `assets/avatars/` y permite importar desde disco (copia a `getApplicationDocumentsDirectory()`).
+		- Uso de `FocusableActionDetector` y `InputService` para navegación por gamepad.
+	- `profile_home.dart` y `profile_emulator_home.dart`: pantallas interiores tras seleccionar perfil.
+	- `emulator_screen.dart`: pantalla donde se ejecuta el emulador con overlay de controles.
+	- Widgets en `lib/widgets`: `onscreen_keyboard.dart`, `emulator_card.dart`, `emulator_game_grid.dart`, `emulator_dialogs.dart`.
+
+	---
+
+	## Formatos de datos y ejemplos
+
+	Ejemplo de `Profile` serializado:
+
+	```json
+	{
+		"id": "163287...",
+		"name": "David",
+		"avatarPath": "asset:assets/avatars/ralph.jpg",
+		"isPrivate": false,
+		"pinHash": null,
+		"emulatorIds": ["emu1","emu2"],
+		"gamePaths": [],
+		"gamesByEmulator": {"emu1": ["C:/roms/game.iso"]}
+	}
+	```
+
+	`EmulatorData` y `GameData` usan `toJson()`/`fromJson()` y son fácilmente serializables.
+
+	---
+
+	## Flujos de uso (detallado)
+
+	1. Inicio
+		 - `main()` intenta inicializar `DartVLC` y `window_manager`.
+		 - `SettingsService.instance.load()` carga preferencias (ventana, volúmenes, paths).
+		 - `AudioService.init()` crea players y aplica volúmenes.
+		 - `InputService.initialize()` prepara detección de gamepads.
+
+	2. Pantalla de perfiles
+		 - `ProfileService.loadProfiles()` carga perfiles desde `SharedPreferences`.
+		 - La pantalla muestra una tarjeta para crear perfil (ícono + texto) y tarjetas para cada perfil guardado.
+		 - Seleccionar 'Crear perfil' abre un diálogo que lee `AssetManifest.json` para listar avatares empaquetados y permite importar desde disco.
+
+	3. Crear perfil
+		 - Validaciones: nombre no vacío; avatar seleccionado (asset o importado); si `Privado` está activado, PIN de 4 dígitos.
+		 - Persistencia: se genera un `id` único y se llama a `ProfileService.saveProfiles()`.
+
+	4. Lanzar emulador
+		 - `Profile` seleccionado -> `ProfileEmulatorHomeScreen` muestra emuladores asociados.
+		 - Al lanzar juego: `AudioService.pauseBgMusic()` (opcional) y `EmulatorRunner.launch()`.
+		 - Al cerrar emulador: `AudioService.resumeBgMusic()`.
+
+	---
+
+	## Casos borde y recomendaciones prácticas
+
+	- Archivos grandes (instaladores): evita añadir ejecutables al repo; usa Git LFS o `releases` en GitHub.
+	- Input listeners: asegura `removeListener()` cuando se cierra un diálogo para evitar pérdidas de control.
+	- Assets: si cambias la convención de `avatarPath`, actualiza todos los renderers que chequean `startsWith('asset:')`.
+	- Manejo de errores: muchos servicios capturan excepciones y hacen `debugPrint`. Para producción, implementar logging centralizado.
+
+	---
+
+	## Guía rápida para nuevos desarrolladores
+
+	1. Hacer un fork/clone y ejecutar `flutter pub get`.
+	2. Ejecutar `flutter analyze`.
+	3. Ejecutar `flutter run -d windows` para pruebas interactivas (si trabajas en Windows).
+	4. Antes de hacer PRs:
+		 - Formatear: `flutter format .`
+		 - Ejecutar `flutter analyze`.
+		 - Probar flujos de UI principales: creación de perfil, importación de avatar, lanzamiento de emulador.
+
+	---
+
+	## Siguientes mejoras recomendadas (prioridad)
+
+	1. Añadir tests unitarios para `ProfileService` (serialización, migraciones) — alto impacto.
+	2. Añadir tests/mocks para `AudioService` y `InputService`.
+	3. Extraer el diálogo de crear perfil a un widget separado y testable.
+	4. Mover instaladores grandes fuera del repo o usar Git LFS.
+
+	---
+
+	Si deseas, genero también:
+
+	- Documentación archivo por archivo (cada clase con ejemplos de uso).
+	- Comentarios estilo `dartdoc` dentro de cada servicio (añadir docstrings).
+	- Tests unitarios de ejemplo que cubran `ProfileService` y las rutas de avatar.
+
+	Fin del README.
