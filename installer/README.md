@@ -3,7 +3,7 @@
 Este directorio contiene el script y la configuración para crear el instalador de EMUCHULL en Windows usando Inno Setup.
 
 Archivos importantes:
-- `playstations.iss` - Script de Inno Setup (configurado para EMUCHULL).
+- `emuchull.iss` - Script de Inno Setup (configurado para EMUCHULL).
 - `build_installer.ps1` - Script de PowerShell que automatiza:
   1. Copiar `assets/icons/emuchull.ico` a `windows/runner/resources/app_icon.ico`.
   2. Ejecutar `flutter build windows --release`.
