@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 
 class SettingsPersistence {
-  static const fileName = 'playstations_settings.json';
+  static const fileName = 'emuchull_settings.json';
 
   Future<File> getLocalFile() async {
     final dir = await getApplicationDocumentsDirectory();

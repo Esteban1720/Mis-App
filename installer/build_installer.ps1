@@ -59,7 +59,8 @@ if ($LASTEXITCODE -ne 0) {
 Pop-Location
 
 # Compilar instalador con Inno Setup
-$iss = Join-Path $root 'installer\playstations.iss'
+# Usar el .iss actualizado para EmuChull
+$iss = Join-Path $root 'installer\emuchull.iss'
 $ISCC = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
 if (!(Test-Path $ISCC)) {
     Write-Error "No se encontró ISCC.exe en $ISCC. Ajusta la variable `\$ISCC` a la ruta correcta de Inno Setup."

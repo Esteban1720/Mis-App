@@ -1,6 +1,6 @@
 {
-    "name": "playstations",
-    "short_name": "playstations",
+    "name": "EmuChull",
+    "short_name": "EmuChull",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
